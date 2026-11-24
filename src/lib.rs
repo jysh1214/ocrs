@@ -103,6 +103,7 @@ pub struct Pipeline {
     shown: Option<Shown>,
     survey: Survey,
     page: Mat,
+    character_width: Option<f32>,
 }
 
 impl Pipeline {
@@ -124,6 +125,7 @@ impl Pipeline {
             shown: None,
             survey: Survey::default(),
             page: Mat::default(),
+            character_width: None,
         })
     }
 
@@ -222,7 +224,16 @@ impl Pipeline {
             }
         };
         rectifier.rectify(frame, area, &mut self.page)?;
-        Ok(layout::page_text(&self.ocr.read(&self.page)?))
+        let boxes = self.ocr.read(&self.page)?;
+        self.character_width = layout::character_width(&boxes);
+        Ok(layout::page_text(&boxes))
+    }
+
+    /// How many pixels wide a character is on the page read last, see [`layout::character_width`]. The
+    /// page has the size that the text area has in the frames unless another one was asked for, so these
+    /// are pixels of the camera.
+    pub fn last_character_width(&self) -> Option<f32> {
+        self.character_width
     }
 
     /// The markers that were made out in the frame processed last.

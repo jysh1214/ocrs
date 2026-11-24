@@ -177,7 +177,8 @@ column of the terminal gets, which is the width of the frame, times the share of
 divided by the columns of the terminal. Screens rendered as clean images are read nearly without errors
 down to 6 pixels a column. A camera adds noise, blur and glare to that, so 10 or more are a better aim: no
 more than some 150 columns across a frame of 1920 pixels, and no more than 50 across one of 640.
-`--dump-pages` shows what `ocrs` gets to read.
+`ocrs` measures it on every page it reads and says so with the text it records (`frame 5: 19 lines, 12.0 px
+a column`) and in the line of figures below the `--preview`; `--dump-pages` shows what it gets to read.
 
 The markers need blank space around them to be found. The margin is that space towards a dark window frame
 or screen bezel, the padding towards the text. Without padding the text touches the corners of the markers

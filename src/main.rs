@@ -164,7 +164,13 @@ fn main() -> Result<()> {
         match outcome {
             Outcome::Text(text) => {
                 recorder.record(&text, frames, pipeline.last_page())?;
-                log.say(format!("frame {frames}: {} lines", text.lines().count()));
+                log.say(format!(
+                    "frame {frames}: {} lines{}",
+                    text.lines().count(),
+                    pipeline
+                        .last_character_width()
+                        .map_or(String::new(), |width| format!(", {width:.1} px a column"))
+                ));
             }
             Outcome::Guess(text) => {
                 recorder.record(&text, frames, pipeline.last_page())?;
@@ -194,8 +200,13 @@ fn main() -> Result<()> {
             frame_at = now;
             let size = frame.size()?;
             let facts = format!(
-                "{}x{} | frame {frames} | {frame_rate:.1} frames a second | {} texts recorded",
-                size.width, size.height, recorder.recorded
+                "{}x{} | frame {frames} | {frame_rate:.1} frames a second | {} texts recorded{}",
+                size.width,
+                size.height,
+                recorder.recorded,
+                pipeline
+                    .last_character_width()
+                    .map_or(String::new(), |width| format!(" | text {width:.1} px a column"))
             );
             let remark = log.held.last().map_or("", String::as_str);
             preview.draw(&frame, pipeline.last_survey(), &facts, remark)?;

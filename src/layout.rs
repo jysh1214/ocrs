@@ -25,6 +25,30 @@ impl TextBox {
     fn left(&self) -> f32 {
         self.corners[0].x.min(self.corners[3].x)
     }
+
+    fn width(&self) -> f32 {
+        let [tl, tr, br, bl] = self.corners;
+        ((tr.x - tl.x).hypot(tr.y - tl.y) + (br.x - bl.x).hypot(br.y - bl.y)) / 2.0
+    }
+}
+
+/// Pieces of text shorter than this say little about how wide their characters are.
+const MIN_MEASURED_CHARACTERS: usize = 8;
+
+/// How wide a character of the page is in pixels: the width of its pieces of text over their characters,
+/// for the piece in the middle of them all. For text in a typewriter font, such as a terminal shows, that
+/// is how many pixels a column of it gets, which decides how well it can be read. `None` for a page
+/// without a piece of text that is long enough to tell.
+pub fn character_width(boxes: &[TextBox]) -> Option<f32> {
+    let mut widths = boxes
+        .iter()
+        .filter_map(|text_box| {
+            let characters = text_box.text.chars().count();
+            (characters >= MIN_MEASURED_CHARACTERS).then(|| text_box.width() / characters as f32)
+        })
+        .collect::<Vec<_>>();
+    widths.sort_by(f32::total_cmp);
+    widths.get(widths.len() / 2).copied()
 }
 
 /// The page as text: rows top to bottom, the boxes of a row left to right with a space between them.
@@ -57,6 +81,40 @@ fn same_row(a: &TextBox, b: &TextBox) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A piece of text in a box of this width, 30 pixels high.
+    fn piece(text: &str, width: f32) -> TextBox {
+        TextBox {
+            corners: [(0.0, 0.0), (width, 0.0), (width, 30.0), (0.0, 30.0)].map(|(x, y)| Point2f::new(x, y)),
+            text: text.to_owned(),
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn character_width_is_that_of_the_piece_in_the_middle() {
+        // 12 pixels a character, but for a piece whose columns of figures were read as one space each
+        let boxes = [
+            piece("a line of thirty characters...", 360.0),
+            piece("Dry thermometer deg C 3 hours", 500.0),
+            piece("another twenty chars", 240.0),
+        ];
+        assert_eq!(character_width(&boxes), Some(12.0));
+        // too short to measure
+        assert_eq!(
+            character_width(&[piece("3.", 40.0), piece("Returns", 90.0)]),
+            None
+        );
+        assert_eq!(character_width(&[]), None);
+    }
+
+    #[test]
+    fn character_width_follows_a_slanted_piece() {
+        let mut slanted = piece("ten chars.", 0.0);
+        slanted.corners =
+            [(0.0, 0.0), (80.0, 60.0), (62.0, 84.0), (-18.0, 24.0)].map(|(x, y)| Point2f::new(x, y));
+        assert_eq!(character_width(&[slanted]), Some(10.0));
+    }
 
     fn text_box(x: f32, y: f32, width: f32, height: f32, text: &str) -> TextBox {
         let corners = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)];
