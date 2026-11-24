@@ -1,4 +1,5 @@
-//! What goes on the terminal: the four markers in its corners and a page of text in the area between them.
+//! What goes on the terminal: the four markers in its corners, a page of text in the area between them, and
+//! between the top two markers a fifth one that tells `ocrs` which screen this is.
 //!
 //! The picture is made of dots of half a character cell each, one column wide and half a row high. A
 //! terminal can draw those with the half block characters, and in the usual fonts they are about square. A
@@ -151,7 +152,9 @@ impl Geometry {
             area.inset(0, 0)?
         };
         let text = panel.inset(2 * settings.pad, settings.pad)?;
-        (text.width() >= MIN_TEXT_COLUMNS).then_some(Self {
+        // the signal marker wants a module of paper between itself and the markers on either side
+        let room_for_signal = area.width() >= marker + 2 * settings.module;
+        (text.width() >= MIN_TEXT_COLUMNS && room_for_signal).then_some(Self {
             columns,
             rows,
             module: settings.module,
@@ -177,34 +180,22 @@ impl Geometry {
         [(near, near), (far_x, near), (far_x, far_y), (near, far_y)]
     }
 
-    /// The cells for the notes above and below the text area: between the markers but two modules clear
-    /// of them, and clear of the rows next to the area, which it may reach into.
-    fn note_cells(&self) -> Option<[Cells; 2]> {
-        let left = self.area.left + 2 * self.module;
-        let right = self.area.right.checked_sub(2 * self.module)?;
-        let above = Cells {
-            left,
-            top: 0,
-            right,
-            bottom: self.area.top.checked_sub(1)?,
-        };
-        let below = Cells {
-            left,
+    /// The dot at the top-left of the signal marker: level with the top markers, half way between them.
+    fn signal_origin(&self) -> (usize, usize) {
+        ((self.columns - self.marker) / 2, self.margin)
+    }
+
+    /// The cells for the notes, below the text area: between the markers but two modules clear of them,
+    /// and clear of the row next to the area, which it may reach into.
+    fn note_cells(&self) -> Option<Cells> {
+        let cells = Cells {
+            left: self.area.left + 2 * self.module,
             top: self.area.bottom + 1,
-            right,
+            right: self.area.right.checked_sub(2 * self.module)?,
             bottom: self.rows,
         };
-        Some([above.inset(0, 0)?, below.inset(0, 0)?])
+        cells.inset(0, 0)
     }
-}
-
-/// Lines for whoever sits at the terminal, shown outside of the text area where `ocrs` does not look.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Notes {
-    /// Between the top markers
-    pub above: Vec<String>,
-    /// Between the bottom markers
-    pub below: Vec<String>,
 }
 
 /// A piece of text at a place on the screen.
@@ -288,18 +279,24 @@ impl Screen {
     }
 }
 
-/// The chart: `markers` (top-left, top-right, bottom-right, bottom-left) around `page`, with `notes` as
-/// far as there is room for them.
+/// The chart: `markers` (top-left, top-right, bottom-right, bottom-left) around `page`, the marker `signal`
+/// between the top two, and below the text area, where `ocrs` does not look, as many of the `notes` for
+/// whoever sits at the terminal as there is room for.
 pub fn compose(
     geometry: &Geometry,
     settings: &Settings,
     markers: &[Pattern; 4],
+    signal: &Pattern,
     page: &[Line],
-    notes: &Notes,
+    notes: &[String],
 ) -> Screen {
     let mut screen = Screen::new(geometry.columns, geometry.rows, settings.paper);
     let module = settings.module;
-    for (pattern, (x, y)) in markers.iter().zip(geometry.marker_origins()) {
+    let origins = geometry
+        .marker_origins()
+        .into_iter()
+        .chain([geometry.signal_origin()]);
+    for (pattern, (x, y)) in markers.iter().chain([signal]).zip(origins) {
         for row in 0..pattern.side() {
             for column in 0..pattern.side() {
                 if pattern.is_dark(row, column) {
@@ -330,11 +327,10 @@ pub fn compose(
         }
     }
 
-    if let Some([above, below]) = geometry.note_cells() {
+    if let Some(cells) = geometry.note_cells() {
         // plain to read from the chair, faint from where the camera is
         let faint = settings.paper.towards(settings.ink, 0.55);
-        screen.centre(above, &notes.above, faint, settings.paper);
-        screen.centre(below, &notes.below, faint, settings.paper);
+        screen.centre(cells, notes, faint, settings.paper);
     }
     screen
 }
@@ -342,7 +338,7 @@ pub fn compose(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use ocrs::markers::{self, Locator};
+    use ocrs::markers::{self, Locator, Signal, Signals};
     use ocrs::ocr::Models;
     use ocrs::{Device, Options, Outcome, Pipeline};
     use opencv::core::{self, CV_8UC3, Mat, Point, Point2f, Rect, Scalar, Size, Vector};
@@ -368,12 +364,22 @@ mod tests {
         ids.map(|id| markers::pattern(dictionary, id).unwrap())
     }
 
+    /// The marker that says `signal` on a chart with these corner markers.
+    fn signal_pattern(dictionary: &str, ids: [i32; 4], signal: Signal) -> Pattern {
+        let id = Signals::new(dictionary, ids).unwrap().id(signal);
+        markers::pattern(dictionary, id).unwrap()
+    }
+
+    /// The chart with the default markers and the signal for the first page.
+    fn chart(geometry: &Geometry, settings: &Settings, page: &[Line], notes: &[String]) -> Screen {
+        let ids = [0, 1, 2, 3];
+        let signal = signal_pattern("4x4_50", ids, Signal::Page(0));
+        compose(geometry, settings, &patterns("4x4_50", ids), &signal, page, notes)
+    }
+
     /// More and longer notes than fit anywhere.
-    fn notes() -> Notes {
-        Notes {
-            above: vec!["x".repeat(200); 7],
-            below: vec!["page 1/1 | module 2".to_owned(), "marker 12x6 cells".to_owned()],
-        }
+    fn notes() -> Vec<String> {
+        vec!["x".repeat(200); 7]
     }
 
     fn lines(texts: &[&str]) -> Vec<Line> {
@@ -519,8 +525,7 @@ mod tests {
         };
         let geometry = Geometry::new(80, 24, 6, &spaced).unwrap();
         let page = lines(&["first", "", "third", "fourth", "does not fit"]);
-        let markers = patterns("4x4_50", [0, 1, 2, 3]);
-        let screen = compose(&geometry, &spaced, &markers, &page, &Notes::default());
+        let screen = chart(&geometry, &spaced, &page, &[]);
         let placed = |run: &Run| (run.column, run.row, run.text.clone());
         assert_eq!(
             screen.runs.iter().map(placed).collect::<Vec<_>>(),
@@ -536,22 +541,44 @@ mod tests {
     fn notes_stay_out_of_the_text_area() {
         let settings = settings();
         let geometry = Geometry::new(80, 24, 6, &settings).unwrap();
-        let screen = compose(
-            &geometry,
-            &settings,
-            &patterns("4x4_50", [0, 1, 2, 3]),
-            &[],
-            &notes(),
-        );
+        let screen = chart(&geometry, &settings, &[], &notes());
         let rows = screen.runs.iter().map(|run| run.row).collect::<Vec<_>>();
-        // The area is the rows 7 to 16 and the rows next to it stay empty. That leaves six rows either way:
-        // one too few for the seven lines above, and the two lines below go into the middle of theirs.
-        assert_eq!(rows, [0, 1, 2, 3, 4, 5, 20, 21]);
+        // the area is the rows 7 to 16 and the row below it stays empty, which leaves six rows for seven
+        // lines
+        assert_eq!(rows, [18, 19, 20, 21, 22, 23]);
         for run in &screen.runs {
             // two modules away from the markers on both sides
             assert!(run.column >= 18 && run.column + run.text.len() <= 62, "{run:?}");
         }
         assert_eq!(screen.runs[0].text, "x".repeat(44));
+
+        // two lines go into the middle of the six rows
+        let screen = chart(&geometry, &settings, &[], &notes()[..2]);
+        let rows = screen.runs.iter().map(|run| run.row).collect::<Vec<_>>();
+        assert_eq!(rows, [20, 21]);
+    }
+
+    #[test]
+    fn signal_marker_sits_between_the_top_markers() {
+        let settings = settings();
+        let geometry = Geometry::new(80, 24, 6, &settings).unwrap();
+        // 12 dots wide like the others, in the middle of 80 columns and level with the top markers
+        assert_eq!(geometry.signal_origin(), (34, 2));
+        let screen = chart(&geometry, &settings, &[], &[]);
+        let ink_in_row = |y: usize| {
+            (0..80)
+                .filter(|&x| screen.dot(x, y) == Rgb::BLACK)
+                .collect::<Vec<_>>()
+        };
+        // the top borders of three markers: columns 2 to 13, 34 to 45 and 66 to 77
+        let borders = (2..14).chain(34..46).chain(66..78).collect::<Vec<_>>();
+        assert_eq!(ink_in_row(2), borders);
+        assert_eq!(ink_in_row(3), borders);
+        assert_eq!(ink_in_row(1), [] as [usize; 0]);
+
+        // the markers have to leave it room, with a module of paper on either side
+        assert!(Geometry::new(44, 24, 6, &settings).is_some());
+        assert!(Geometry::new(43, 24, 6, &settings).is_none());
     }
 
     #[test]
@@ -561,17 +588,11 @@ mod tests {
             margin: 0,
             ..settings()
         };
-        // markers of three rows leave two rows for notes, next to the row that is kept empty
+        // markers of three rows leave two rows for notes, below the row that is kept empty
         let geometry = Geometry::new(60, 20, 6, &small).unwrap();
-        let screen = compose(
-            &geometry,
-            &small,
-            &patterns("4x4_50", [0, 1, 2, 3]),
-            &[],
-            &notes(),
-        );
+        let screen = chart(&geometry, &small, &[], &notes());
         let rows = screen.runs.iter().map(|run| run.row).collect::<Vec<_>>();
-        assert_eq!(rows, [0, 1, 18, 19]);
+        assert_eq!(rows, [18, 19]);
     }
 
     /// The corners of the text area in an image of the screen with cells of `cell` pixels.
@@ -615,15 +636,25 @@ mod tests {
             case("4x4_50", [0, 1, 2, 3], 2, 1, true, (10, 20)),
             case("4x4_50", [0, 1, 2, 3], 3, 1, true, (10, 20)),
         ];
-        for Case {
-            dictionary,
-            ids,
-            module,
-            margin,
-            invert,
-            cell,
-        } in cases
-        {
+        // every chart says something else about itself
+        let signals = [
+            Signal::Ready,
+            Signal::Page(0),
+            Signal::Page(7),
+            Signal::Page(15),
+            Signal::Done,
+            Signal::Page(1),
+            Signal::Page(2),
+        ];
+        for (case, signal) in cases.into_iter().zip(signals) {
+            let Case {
+                dictionary,
+                ids,
+                module,
+                margin,
+                invert,
+                cell,
+            } = case;
             let settings = Settings {
                 module,
                 margin,
@@ -633,12 +664,15 @@ mod tests {
             let markers = patterns(dictionary, ids);
             let geometry = Geometry::new(120, 40, markers[0].side(), &settings).unwrap();
             let page = lines(&["Some text", "to look past"]);
-            let screen = rasterize(&compose(&geometry, &settings, &markers, &page, &notes()), cell)?;
+            let fifth = signal_pattern(dictionary, ids, signal);
+            let chart = compose(&geometry, &settings, &markers, &fifth, &page, &notes());
+            let screen = rasterize(&chart, cell)?;
 
             let found = Locator::new(dictionary, ids)?.locate(&screen)?;
             let label = format!("{dictionary} module {module} invert {invert}");
-            let quad = found.unwrap_or_else(|| panic!("{label}: markers not found"));
-            for (corner, (x, y)) in quad.iter().zip(area_in_pixels(&geometry, cell)) {
+            let sighting = found.unwrap_or_else(|| panic!("{label}: markers not found"));
+            assert_eq!(sighting.signal, Some(signal), "{label}");
+            for (corner, (x, y)) in sighting.area.iter().zip(area_in_pixels(&geometry, cell)) {
                 // the detector reports the middle of the pixels along a marker's outline
                 assert!(
                     (corner.x - x).abs() <= 1.5 && (corner.y - y).abs() <= 1.5,
@@ -649,29 +683,43 @@ mod tests {
         Ok(())
     }
 
-    fn read_photograph(settings: &Settings) -> Result<Outcome> {
-        let ids = [7, 3, 11, 5];
-        let markers = patterns("4x4_50", ids);
+    /// Top-left, top-right, bottom-right, bottom-left
+    const IDS: [i32; 4] = [7, 3, 11, 5];
+
+    /// A camera frame of a chart on a terminal of 80 by 24 cells that says `signal` and shows `page`.
+    fn frame(settings: &Settings, signal: Signal, page: &[&str]) -> Result<Mat> {
+        let markers = patterns("4x4_50", IDS);
         let geometry = Geometry::new(80, 24, markers[0].side(), settings).unwrap();
-        let page = lines(&[
-            "Invoice 2026-0417",
-            "Total due: 1,284.50 USD",
-            "Thank you for your order!",
-        ]);
-        let notes = Notes {
-            above: vec!["space/n next page   q quit".to_owned()],
-            below: vec!["page 1/1 | module 2 | margin 1 | pad 1".to_owned()],
-        };
-        let screen = rasterize(&compose(&geometry, settings, &markers, &page, &notes), (24, 48))?;
-        let mut pipeline = Pipeline::new(Options {
+        let notes = [
+            "page 1/1 | module 2 | margin 1 | pad 1".to_owned(),
+            "space/n next page   q quit".to_owned(),
+        ];
+        let fifth = signal_pattern("4x4_50", IDS, signal);
+        let chart = compose(&geometry, settings, &markers, &fifth, &lines(page), &notes);
+        photograph(&rasterize(&chart, (24, 48))?)
+    }
+
+    /// A pipeline for those frames, that takes a text once `stable_frames` frames agree on it.
+    fn pipeline(stable_frames: usize) -> Result<Pipeline> {
+        Pipeline::new(Options {
             device: Device::Cpu,
             dictionary: "4x4_50".to_owned(),
-            marker_ids: ids,
+            marker_ids: IDS,
             page_size: None,
-            min_similarity: 1.0,
+            stable_frames,
+            min_similarity: 0.9,
             models: Models::default(),
-        })?;
-        pipeline.process(&photograph(&screen)?)
+        })
+    }
+
+    const PAGE: [&str; 3] = [
+        "Invoice 2026-0417",
+        "Total due: 1,284.50 USD",
+        "Thank you for your order!",
+    ];
+
+    fn read_photograph(settings: &Settings) -> Result<Outcome> {
+        pipeline(1)?.process(&frame(settings, Signal::Page(0), &PAGE)?)
     }
 
     const PAGE_TEXT: &str = "Invoice 2026-0417\nTotal due: 1,284.50 USD\nThank you for your order!";
@@ -679,6 +727,89 @@ mod tests {
     #[test]
     fn pipeline_reads_the_page_off_a_photographed_screen() -> Result<()> {
         assert_eq!(read_photograph(&settings())?, Outcome::Text(PAGE_TEXT.to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_follows_the_screens_of_a_show() -> Result<()> {
+        let settings = settings();
+        let ready = frame(&settings, Signal::Ready, &["Enter starts."])?;
+        let first = frame(&settings, Signal::Page(0), &PAGE)?;
+        let second = frame(&settings, Signal::Page(1), &["Second page", "delta epsilon"])?;
+        // the same text as on the second page: what the chart says tells the two apart
+        let third = frame(&settings, Signal::Page(2), &["Second page", "delta epsilon"])?;
+        let done = frame(&settings, Signal::Done, &["End."])?;
+
+        let mut pipeline = pipeline(3)?;
+        let frames = [
+            &ready, &ready, &first, &first, &first, &first, &second, &second, &second, &third, &third, &done,
+            &done,
+        ];
+        let mut outcomes = Vec::new();
+        for frame in frames {
+            outcomes.push(pipeline.process(frame)?);
+        }
+        let second_text = "Second page\ndelta epsilon";
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::Ready,
+                Outcome::Ready,
+                Outcome::Unsettled,
+                Outcome::Unsettled,
+                Outcome::Text(PAGE_TEXT.to_owned()),
+                // read already: this frame is not even looked at
+                Outcome::Duplicate,
+                Outcome::Unsettled,
+                Outcome::Unsettled,
+                Outcome::Text(second_text.to_owned()),
+                Outcome::Unsettled,
+                Outcome::Unsettled,
+                // the third page went away after two frames, which is one too few to be sure of it
+                Outcome::Guess(second_text.to_owned()),
+                Outcome::Done,
+            ]
+        );
+        assert_eq!(pipeline.finish(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn page_on_show_to_the_end_is_guessed_when_the_frames_run_out() -> Result<()> {
+        let settings = settings();
+        let first = frame(&settings, Signal::Page(4), &PAGE)?;
+        let mut pipeline = pipeline(3)?;
+        assert_eq!(pipeline.process(&first)?, Outcome::Unsettled);
+        assert_eq!(pipeline.process(&first)?, Outcome::Unsettled);
+        assert_eq!(pipeline.finish(), Some(PAGE_TEXT.to_owned()));
+        assert_eq!(pipeline.finish(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn frame_between_two_screens_is_passed_over() -> Result<()> {
+        let settings = settings();
+        let first = frame(&settings, Signal::Page(0), &PAGE)?;
+        let second = frame(&settings, Signal::Page(1), &["Second page", "delta epsilon"])?;
+        let mut between = Mat::default();
+        core::add_weighted_def(&first, 0.5, &second, 0.5, 0.0, &mut between)?;
+
+        let mut pipeline = pipeline(2)?;
+        let mut outcomes = Vec::new();
+        for frame in [&first, &first, &between, &second, &second] {
+            outcomes.push(pipeline.process(frame)?);
+        }
+        let texts = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Outcome::Text(_) | Outcome::Guess(_)));
+        assert_eq!(
+            texts.collect::<Vec<_>>(),
+            [
+                &Outcome::Text(PAGE_TEXT.to_owned()),
+                &Outcome::Text("Second page\ndelta epsilon".to_owned())
+            ],
+            "{outcomes:?}"
+        );
         Ok(())
     }
 

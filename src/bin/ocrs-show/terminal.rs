@@ -122,7 +122,7 @@ mod tests {
     use ocrs::markers;
 
     use super::*;
-    use crate::chart::{Geometry, Notes, Settings, compose};
+    use crate::chart::{Geometry, Settings, compose};
     use crate::text::Line;
 
     #[test]
@@ -144,8 +144,10 @@ mod tests {
             at: (0, 0),
         }];
         let mut frame = Vec::new();
+        // the marker of id 6 is the signal for the first page
+        let signal = markers::pattern("4x4_50", 6).unwrap();
         encode(
-            &compose(&geometry, &settings, &markers, &page, &Notes::default()),
+            &compose(&geometry, &settings, &markers, &signal, &page, &[]),
             &mut frame,
         )
         .unwrap();

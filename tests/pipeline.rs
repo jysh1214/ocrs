@@ -80,12 +80,18 @@ fn pipeline() -> Result<Pipeline> {
 }
 
 fn pipeline_on(device: Device) -> Result<Pipeline> {
+    pipeline_with(device, 1, 1.0)
+}
+
+/// A pipeline that wants `stable_frames` frames to agree, at `min_similarity`, before a text counts.
+fn pipeline_with(device: Device, stable_frames: usize, min_similarity: f64) -> Result<Pipeline> {
     Pipeline::new(Options {
         device,
         dictionary: "4x4_50".to_owned(),
         marker_ids: IDS,
         page_size: None,
-        min_similarity: 1.0,
+        stable_frames,
+        min_similarity,
         models: Models::default(),
     })
 }
@@ -124,6 +130,43 @@ fn consecutive_frames_with_the_same_text_are_reported_once() -> Result<()> {
             "First page\nalpha beta gamma"
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn text_counts_once_most_of_the_recent_frames_agree() -> Result<()> {
+    let first = photograph(&page(&["First page", "alpha beta gamma"])?)?;
+    let second = photograph(&page(&["Second page", "delta epsilon"])?)?;
+    // what a camera sees while the page changes: both at once
+    let mut between = Mat::default();
+    core::add_weighted_def(&first, 0.5, &second, 0.5, 0.0, &mut between)?;
+
+    let mut pipeline = pipeline_with(Device::Cpu, 3, 0.9)?;
+    let frames = [
+        &first, &first, &first, &first, &between, &second, &second, &second, &second,
+    ];
+    let mut outcomes = Vec::new();
+    for frame in frames {
+        outcomes.push(pipeline.process(frame)?);
+    }
+    let text = |lines: &str| Outcome::Text(lines.to_owned());
+    assert_eq!(
+        outcomes,
+        [
+            Outcome::Unsettled,
+            Outcome::Unsettled,
+            text("First page\nalpha beta gamma"),
+            Outcome::Duplicate,
+            // whatever the frame between the pages reads, three of the last five frames read the first page
+            Outcome::Duplicate,
+            Outcome::Duplicate,
+            // two frames for either page
+            Outcome::Unsettled,
+            text("Second page\ndelta epsilon"),
+            Outcome::Duplicate,
+        ]
+    );
+    assert_eq!(pipeline.finish(), None);
     Ok(())
 }
 

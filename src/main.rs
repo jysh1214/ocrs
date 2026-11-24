@@ -1,9 +1,13 @@
+mod preview;
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
+use clap::builder::RangedU64ValueParser;
 use opencv::core::{Mat, Size, Vector};
 use opencv::prelude::*;
 use opencv::{imgcodecs, videoio};
@@ -11,6 +15,8 @@ use opencv::{imgcodecs, videoio};
 use ocrs::markers;
 use ocrs::ocr::Models;
 use ocrs::{Device, Options, Outcome, Pipeline};
+
+use preview::Preview;
 
 /// Reads the text between four ArUco / AprilTag markers in every frame of a video and writes it to a text
 /// file, skipping frames that show the same text as the frame before.
@@ -32,6 +38,11 @@ struct Cli {
     #[arg(long, value_parser = parse_size, value_name = "WIDTHxHEIGHT")]
     camera_size: Option<Size>,
 
+    /// Show what the camera sees on this terminal while reading, with the markers that are found in it
+    /// marked, for pointing the camera; q quits
+    #[arg(long)]
+    preview: bool,
+
     /// Marker dictionary, an OpenCV predefined one such as 4x4_50, 6x6_250 or apriltag_36h11
     #[arg(long, default_value = "4x4_50")]
     dict: String,
@@ -44,9 +55,15 @@ struct Cli {
     #[arg(long, value_parser = parse_size, value_name = "WIDTHxHEIGHT")]
     page_size: Option<Size>,
 
-    /// How alike (0 to 1) the texts of two consecutive frames must be to count as the same content. Below 1
-    /// a few characters may differ, which absorbs what a camera's noise does to the reading of an unchanged
-    /// page; 1 only skips a frame whose text is identical
+    /// How many frames must read a text before it is recorded: it counts once this many of the last 2N-1
+    /// frames agree on it. That passes over frames that are blurred or caught between two pages; 1 records
+    /// what any single frame reads [default: 3, and 1 for pictures]
+    #[arg(long, value_name = "FRAMES", value_parser = RangedU64ValueParser::<usize>::new().range(1..=100))]
+    stable: Option<usize>,
+
+    /// How alike (0 to 1) two texts must be to count as the same content, for frames to agree on a text
+    /// and for a text to repeat the one before it. Below 1 a few characters may differ, which absorbs what
+    /// a camera's noise does to the reading of an unchanged page; 1 takes identical texts only
     #[arg(long, default_value_t = 0.9, value_name = "RATIO")]
     similarity: f64,
 
@@ -99,11 +116,13 @@ fn main() -> Result<()> {
         models.dictionary = String::from_utf8(read(dictionary)?)
             .with_context(|| format!("{} is not UTF-8 text", dictionary.display()))?;
     }
+    let stable_frames = cli.stable.unwrap_or(if is_picture(&cli.input) { 1 } else { 3 });
     let mut pipeline = Pipeline::new(Options {
         device: cli.device,
         dictionary: cli.dict,
         marker_ids: cli.ids,
         page_size: cli.page_size,
+        stable_frames,
         min_similarity: cli.similarity,
         models,
     })?;
@@ -113,45 +132,187 @@ fn main() -> Result<()> {
         fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
     }
     let file = File::create(&cli.output).with_context(|| format!("can't create {}", cli.output.display()))?;
-    let mut output = BufWriter::new(file);
+    let mut recorder = Recorder {
+        output: BufWriter::new(file),
+        separator: cli.separator.as_deref(),
+        dump_pages: cli.dump_pages.as_deref(),
+        recorded: 0,
+    };
 
-    let (mut frames, mut located, mut recorded) = (0u64, 0u64, 0u64);
+    let mut log = Log {
+        preview: if cli.preview { Some(Preview::open()?) } else { None },
+        held: Vec::new(),
+    };
+
+    let (mut frames, mut located, mut unsettled) = (0u64, 0u64, 0u64);
+    // whether the last frame with markers showed the start screen of ocrs-show
+    let mut waiting = false;
+    let (mut frame_rate, mut frame_at) = (0.0, Instant::now());
     let mut frame = Mat::default();
     while capture.read(&mut frame)? && !frame.empty() {
         frames += 1;
         let outcome = pipeline
             .process(&frame)
             .with_context(|| format!("frame {frames}"))?;
+        let was_waiting = waiting;
         if outcome != Outcome::NoMarkers {
             located += 1;
+            waiting = outcome == Outcome::Ready;
         }
-        let Outcome::Text(text) = outcome else { continue };
-        if let (Some(separator), true) = (&cli.separator, recorded > 0) {
-            writeln!(output, "{separator}")?;
+        unsettled += u64::from(outcome == Outcome::Unsettled);
+        let done = outcome == Outcome::Done;
+        match outcome {
+            Outcome::Text(text) => {
+                recorder.record(&text, frames, pipeline.last_page())?;
+                log.say(format!("frame {frames}: {} lines", text.lines().count()));
+            }
+            Outcome::Guess(text) => {
+                recorder.record(&text, frames, pipeline.last_page())?;
+                log.say(format!(
+                    "frame {frames}: {} lines, the likeliest reading of a page that went away before its frames \
+                     agreed",
+                    text.lines().count()
+                ));
+            }
+            Outcome::Ready if !was_waiting => {
+                log.say(format!(
+                    "frame {frames}: start screen in view, waiting for the first page"
+                ));
+            }
+            Outcome::Done => log.say(format!("frame {frames}: end screen in view")),
+            _ => {}
         }
-        writeln!(output, "{text}")?;
-        // every frame's text is on disk before the next frame is looked at
-        output.flush()?;
-        recorded += 1;
-        eprintln!("frame {frames}: {} lines", text.lines().count());
-        if let Some(dir) = &cli.dump_pages {
-            let path = dir.join(format!("frame_{frames:06}.png"));
-            let saved = imgcodecs::imwrite(&path, pipeline.last_page(), &Vector::new())?;
-            ensure!(saved, "can't write {}", path.display());
+        if let Some(preview) = &mut log.preview {
+            // smoothed over the last few frames
+            let now = Instant::now();
+            let rate = 1.0 / now.duration_since(frame_at).as_secs_f64().max(1e-3);
+            frame_rate = if frames == 1 {
+                rate
+            } else {
+                0.8 * frame_rate + 0.2 * rate
+            };
+            frame_at = now;
+            let size = frame.size()?;
+            let facts = format!(
+                "{}x{} | frame {frames} | {frame_rate:.1} frames a second | {} texts recorded",
+                size.width, size.height, recorder.recorded
+            );
+            let remark = log.held.last().map_or("", String::as_str);
+            preview.draw(&frame, pipeline.last_survey(), &facts, remark)?;
+            if preview.quit_requested()? {
+                log.say(format!("frame {frames}: stopped by a key"));
+                break;
+            }
+        }
+        if done {
+            break;
         }
     }
+    if let Some(text) = pipeline.finish() {
+        recorder.record(&text, frames, pipeline.last_page())?;
+        log.say(format!(
+            "{} lines, the likeliest reading of the last page, which was not on show until its frames agreed",
+            text.lines().count()
+        ));
+    }
 
-    eprintln!(
-        "{frames} frames read, {located} with all four markers, {recorded} recorded in {}",
+    log.say(format!(
+        "{frames} frames read, {located} with all four markers, {} recorded in {}",
+        recorder.recorded,
         cli.output.display()
-    );
+    ));
+    if frames > 0 && located == 0 {
+        log.say("no frame showed all four markers, check --dict and --ids against the markers in use");
+    } else if recorder.recorded == 0 && unsettled > 0 {
+        log.say(format!(
+            "the frames never agreed on a text: {stable_frames} of {} in a row have to, see --stable and \
+             --similarity",
+            2 * stable_frames - 1
+        ));
+    }
+    log.close();
     if frames == 0 {
         bail!("no frame could be read from {}", cli.input);
     }
-    if located == 0 {
-        eprintln!("no frame showed all four markers, check --dict and --ids against the markers in use");
-    }
     Ok(())
+}
+
+/// Where the remarks about the run go: to stderr, at once or, while the preview has the terminal, when it
+/// has given it back.
+struct Log {
+    preview: Option<Preview>,
+    /// The remarks made while the preview was on
+    held: Vec<String>,
+}
+
+impl Log {
+    fn say(&mut self, remark: impl Into<String>) {
+        let remark = remark.into();
+        if self.preview.is_some() {
+            self.held.push(remark);
+        } else {
+            eprintln!("{remark}");
+        }
+    }
+
+    /// Ends the preview, if there is one, and prints what was said meanwhile.
+    fn close(&mut self) {
+        self.preview = None;
+        for remark in self.held.drain(..) {
+            eprintln!("{remark}");
+        }
+    }
+}
+
+impl Drop for Log {
+    /// Also when an error ends the run, the terminal comes back before anything is printed.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Appends the texts to the output file, and the pages they were read from to the directory for those.
+struct Recorder<'a> {
+    output: BufWriter<File>,
+    separator: Option<&'a str>,
+    dump_pages: Option<&'a Path>,
+    recorded: u64,
+}
+
+impl Recorder<'_> {
+    /// `frame` is the number of the frame at which the text is recorded, `page` what was read last.
+    fn record(&mut self, text: &str, frame: u64, page: &Mat) -> Result<()> {
+        if let (Some(separator), true) = (self.separator, self.recorded > 0) {
+            writeln!(self.output, "{separator}")?;
+        }
+        writeln!(self.output, "{text}")?;
+        // every text is on disk before the next frame is looked at
+        self.output.flush()?;
+        self.recorded += 1;
+        if let Some(dir) = self.dump_pages {
+            let path = dir.join(format!("frame_{frame:06}.png"));
+            let saved = imgcodecs::imwrite(&path, page, &Vector::new())?;
+            ensure!(saved, "can't write {}", path.display());
+        }
+        Ok(())
+    }
+}
+
+/// Whether the input is one picture or a sequence of them, going by its name. Each picture is a view of
+/// its own, so there is nothing for consecutive ones to agree on, unlike the frames of a camera or video.
+fn is_picture(input: &str) -> bool {
+    const PICTURES: [&str; 15] = [
+        "png", "jpg", "jpeg", "jpe", "bmp", "dib", "tif", "tiff", "webp", "pbm", "pgm", "ppm", "pnm", "jp2",
+        "avif",
+    ];
+    Path::new(input)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            PICTURES
+                .iter()
+                .any(|picture| picture.eq_ignore_ascii_case(extension))
+        })
 }
 
 /// Opens a camera for a plain number, a file or image sequence for anything else. A camera is asked for
@@ -401,6 +562,16 @@ mod tests {
             error.to_string().contains("--camera-size is for a camera"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn pictures_are_told_from_videos_and_cameras_by_name() {
+        for picture in ["page.png", "scans/scan_%04d.JPG", "a.b.tiff"] {
+            assert!(is_picture(picture), "{picture}");
+        }
+        for other in ["0", "2", "recording.mp4", "clip.mkv", "png", "pictures.png/video"] {
+            assert!(!is_picture(other), "{other}");
+        }
     }
 
     #[test]

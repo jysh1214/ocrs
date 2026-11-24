@@ -132,10 +132,121 @@ pub fn pattern(dictionary: &str, id: i32) -> Result<Pattern> {
     })
 }
 
+/// What a chart of `ocrs-show` says about the screen it is on, with a fifth marker between the top two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// The start screen: the pages are still to come
+    Ready,
+    /// A page. Pages that follow each other have numbers that follow each other, and after
+    /// `PAGE_NUMBERS - 1` comes 0 again.
+    Page(usize),
+    /// The end screen: all pages have been shown
+    Done,
+}
+
+/// How many page numbers there are before they start over.
+pub const PAGE_NUMBERS: usize = 16;
+
+/// The marker ids that stand for the signals: the first ones of the dictionary that the corners of the
+/// text area don't use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signals {
+    ready: i32,
+    done: i32,
+    pages: [i32; PAGE_NUMBERS],
+}
+
+impl Signals {
+    /// `corner_ids` are the markers around the text area, which leave the others for signals.
+    pub fn new(dictionary: &str, corner_ids: [i32; 4]) -> Result<Self> {
+        let predefined = objdetect::get_predefined_dictionary(parse_dictionary(dictionary)?)?;
+        let mut free = (0..predefined.bytes_list().rows()).filter(|id| !corner_ids.contains(id));
+        let mut next = || {
+            free.next()
+                .with_context(|| format!("dictionary {dictionary} has too few markers for signals"))
+        };
+        let (ready, done) = (next()?, next()?);
+        let mut pages = [0; PAGE_NUMBERS];
+        for page in &mut pages {
+            *page = next()?;
+        }
+        Ok(Self { ready, done, pages })
+    }
+
+    /// The id of the marker that stands for `signal`.
+    pub fn id(&self, signal: Signal) -> i32 {
+        match signal {
+            Signal::Ready => self.ready,
+            Signal::Done => self.done,
+            Signal::Page(number) => self.pages[number % PAGE_NUMBERS],
+        }
+    }
+
+    /// What the marker `id` stands for, if it is a signal.
+    pub fn signal(&self, id: i32) -> Option<Signal> {
+        if id == self.ready {
+            Some(Signal::Ready)
+        } else if id == self.done {
+            Some(Signal::Done)
+        } else {
+            self.pages.iter().position(|page| *page == id).map(Signal::Page)
+        }
+    }
+}
+
+/// What a frame shows of a text area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sighting {
+    /// The area enclosed by the four markers
+    pub area: Quad,
+    /// What the chart says about itself, if it is one of `ocrs-show` and says one thing only: a frame
+    /// taken while the screen changes can show two signals on top of each other
+    pub signal: Option<Signal>,
+}
+
+/// The corners of a marker in a frame.
+pub type Outline = [Point2f; 4];
+
+/// Everything that is made out of markers in a frame: more than is needed to find the text area, for
+/// showing somebody who points a camera what it takes for what.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Survey {
+    /// The markers at the top-left, top-right, bottom-right and bottom-left corner of the text area, as
+    /// far as they are found
+    pub corners: [Option<Outline>; 4],
+    /// The marker that says what a chart of `ocrs-show` has on show, if there is exactly one
+    pub signal: Option<(Signal, Outline)>,
+    /// Other markers of the dictionary, with their ids
+    pub strangers: Vec<(i32, Outline)>,
+    /// Squares that look like markers and can't be read as one: markers that are too small, blurred or
+    /// outshone, and whatever else is dark and square
+    pub unread: Vec<Outline>,
+}
+
+impl Survey {
+    /// The text area, if all four of its markers are found.
+    pub fn sighting(&self) -> Option<Sighting> {
+        let [
+            Some(top_left),
+            Some(top_right),
+            Some(bottom_right),
+            Some(bottom_left),
+        ] = self.corners
+        else {
+            return None;
+        };
+        Some(Sighting {
+            area: enclosed_area(&[top_left, top_right, bottom_right, bottom_left]),
+            signal: self.signal.map(|(signal, _)| signal),
+        })
+    }
+}
+
 /// Detects the four markers and reports the area they enclose.
 pub struct Locator {
     detector: ArucoDetector,
     ids: [i32; 4],
+    signals: Signals,
 }
 
 impl Locator {
@@ -143,37 +254,88 @@ impl Locator {
     /// Telling them apart by id is what gives the page its orientation, so they have to differ.
     pub fn new(dictionary: &str, ids: [i32; 4]) -> Result<Self> {
         ensure_distinct(&ids)?;
+        let signals = Signals::new(dictionary, ids)?;
         let dictionary = objdetect::get_predefined_dictionary(parse_dictionary(dictionary)?)?;
         let mut parameters = DetectorParameters::default()?;
         // marker corners end up as page corners, so they are worth the sub-pixel pass
         parameters.set_corner_refinement_method(CornerRefineMethod::CORNER_REFINE_SUBPIX as i32);
         let detector = ArucoDetector::new(&dictionary, &parameters, RefineParameters::new_def()?)?;
-        Ok(Self { detector, ids })
+        Ok(Self {
+            detector,
+            ids,
+            signals,
+        })
     }
 
     /// The area enclosed by the markers, or `None` unless all four are visible in `frame`.
-    pub fn locate(&self, frame: &Mat) -> Result<Option<Quad>> {
-        let mut corners = Vector::<Vector<Point2f>>::new();
-        let mut found = Vector::<i32>::new();
-        self.detector
-            .detect_markers_def(frame, &mut corners, &mut found)?;
+    pub fn locate(&self, frame: &Mat) -> Result<Option<Sighting>> {
+        Ok(self.survey(frame)?.sighting())
+    }
 
-        let mut markers = [[Point2f::default(); 4]; 4];
-        for (marker, id) in markers.iter_mut().zip(self.ids) {
-            let Some(index) = found.iter().position(|candidate| candidate == id) else {
-                return Ok(None);
-            };
-            let outline = corners.get(index)?;
+    /// Everything that can be made out of markers in `frame`.
+    pub fn survey(&self, frame: &Mat) -> Result<Survey> {
+        let mut outlines = Vector::<Vector<Point2f>>::new();
+        let mut found = Vector::<i32>::new();
+        let mut rejected = Vector::<Vector<Point2f>>::new();
+        self.detector
+            .detect_markers(frame, &mut outlines, &mut found, &mut rejected)?;
+
+        let outline = |points: Vector<Point2f>| -> Result<Outline> {
             ensure!(
-                outline.len() == 4,
-                "marker {id} was reported with {} corners",
-                outline.len()
+                points.len() == 4,
+                "a marker was reported with {} corners",
+                points.len()
             );
-            for (corner, point) in marker.iter_mut().zip(&outline) {
-                *corner = point;
+            Ok(std::array::from_fn(|corner| {
+                points.get(corner).expect("four corners")
+            }))
+        };
+        let mut survey = Survey::default();
+        let mut signals = Vec::new();
+        for (id, points) in found.iter().zip(&outlines) {
+            let outline = outline(points)?;
+            if let Some(corner) = self.ids.iter().position(|own| *own == id) {
+                // the first of two markers with the same id
+                survey.corners[corner].get_or_insert(outline);
+            } else if let Some(signal) = self.signals.signal(id) {
+                signals.push((signal, id, outline));
+            } else {
+                survey.strangers.push((id, outline));
             }
         }
-        Ok(Some(enclosed_area(&markers)))
+        match signals.as_slice() {
+            [(signal, _, outline)] => survey.signal = Some((*signal, *outline)),
+            // two signals at once say nothing
+            several => survey
+                .strangers
+                .extend(several.iter().map(|(_, id, outline)| (*id, *outline))),
+        }
+        // the white patches inside a marker are squares of their own to the detector, and no news
+        let read = survey
+            .corners
+            .iter()
+            .flatten()
+            .chain(survey.signal.iter().map(|(_, outline)| outline))
+            .chain(survey.strangers.iter().map(|(_, outline)| outline))
+            .copied()
+            .collect::<Vec<_>>();
+        for points in &rejected {
+            let outline = outline(points)?;
+            let middle_x = outline.iter().map(|corner| corner.x).sum::<f32>() / 4.0;
+            let middle_y = outline.iter().map(|corner| corner.y).sum::<f32>() / 4.0;
+            let inside = |marker: &Outline| {
+                let (xs, ys) = (marker.map(|corner| corner.x), marker.map(|corner| corner.y));
+                let within = |value: f32, range: [f32; 4]| {
+                    value >= range.into_iter().fold(f32::INFINITY, f32::min)
+                        && value <= range.into_iter().fold(f32::NEG_INFINITY, f32::max)
+                };
+                within(middle_x, xs) && within(middle_y, ys)
+            };
+            if !read.iter().any(inside) {
+                survey.unread.push(outline);
+            }
+        }
+        Ok(survey)
     }
 }
 
@@ -232,6 +394,31 @@ mod tests {
             let error = parse_ids(wrong).unwrap_err().to_string();
             assert!(error.contains(reason), "{wrong:?}: {error}");
         }
+    }
+
+    #[test]
+    fn signals_take_the_ids_that_the_corners_leave() -> Result<()> {
+        let signals = Signals::new("4x4_50", [0, 1, 2, 3])?;
+        assert_eq!(signals.id(Signal::Ready), 4);
+        assert_eq!(signals.id(Signal::Done), 5);
+        assert_eq!(signals.id(Signal::Page(0)), 6);
+        assert_eq!(signals.id(Signal::Page(15)), 21);
+        // page numbers start over
+        assert_eq!(signals.id(Signal::Page(16)), 6);
+        assert_eq!(signals.signal(21), Some(Signal::Page(15)));
+        assert_eq!(signals.signal(4), Some(Signal::Ready));
+        assert_eq!(signals.signal(5), Some(Signal::Done));
+        for no_signal in [0, 3, 22, 49] {
+            assert_eq!(signals.signal(no_signal), None);
+        }
+
+        let signals = Signals::new("apriltag_16h5", [5, 0, 7, 2])?;
+        assert_eq!(signals.id(Signal::Ready), 1);
+        assert_eq!(signals.id(Signal::Done), 3);
+        assert_eq!(signals.id(Signal::Page(0)), 4);
+        assert_eq!(signals.id(Signal::Page(1)), 6);
+        assert_eq!(signals.id(Signal::Page(2)), 8);
+        Ok(())
     }
 
     #[test]

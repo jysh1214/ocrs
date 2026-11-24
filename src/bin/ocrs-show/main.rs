@@ -5,6 +5,7 @@ mod chart;
 mod terminal;
 mod text;
 
+use std::borrow::Cow;
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -15,11 +16,11 @@ use clap::Parser;
 use clap::builder::RangedU64ValueParser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use ocrs::markers::{self, Pattern};
+use ocrs::markers::{self, PAGE_NUMBERS, Pattern, Signal, Signals};
 
-use chart::{Geometry, Notes, Rgb, Screen, Settings};
+use chart::{Geometry, Rgb, Screen, Settings};
 use terminal::{Size, Terminal};
-use text::{Page, Wrap};
+use text::{Line, Page, Wrap};
 
 const MODULE: RangeInclusive<usize> = 1..=16;
 const MARGIN: RangeInclusive<usize> = 0..=8;
@@ -31,23 +32,24 @@ const DEFAULT_IDS: [i32; 4] = [0, 1, 2, 3];
 
 const KEYS: &str = "\
 Keys:
-  space, n, right, down    next page
-  p, left, up              previous page
-  g, G                     first, last page
-  + -                      larger, smaller markers
-  ] [                      more, less padding around the text
-  } {                      more, less margin around the markers
-  . ,                      more, fewer empty rows between the lines
-  i                        light text on a dark panel, and back
-  b                        bold text, and back
-  w                        wrap or cut off long lines
-  h                        hide or show the notes above and below the text
-  q, esc                   quit, and print the options for the layout as it was then
+  enter, space, n, right, down    next page; from the start screen to the first page
+  p, left, up                     previous page
+  g, G                            first, last page
+  + -                             larger, smaller markers
+  ] [                             more, less padding around the text
+  } {                             more, less margin around the markers
+  . ,                             more, fewer empty rows between the lines
+  i                               light text on a dark panel, and back
+  b                               bold text, and back
+  w                               wrap or cut off long lines
+  h                               hide or show the notes below the text
+  q, esc                          quit, and print the options for the layout as it was then
 
 The text has the size of the terminal's font: change that in the terminal and the layout follows.";
 
 /// Shows a text file between four ArUco / AprilTag markers on the terminal, as a target to point a camera
-/// at: `ocrs` reads the text between the markers back.
+/// at: `ocrs` reads the text between the markers back. It starts on a start screen and ends on an end
+/// screen, and a fifth marker tells `ocrs` which screen or page is on show.
 #[derive(Parser)]
 #[command(version, after_help = KEYS)]
 struct Cli {
@@ -98,11 +100,11 @@ struct Cli {
     #[arg(long, default_value_t = Rgb::WHITE, value_name = "RRGGBB")]
     paper: Rgb,
 
-    /// Turn to the next page by itself every so many seconds, and from the last page to the first
+    /// Turn to the next page by itself every so many seconds, from the first page on to the end screen
     #[arg(long, value_name = "SECONDS")]
     interval: Option<f64>,
 
-    /// Start without the notes above and below the text area: the keys and the measurements
+    /// Start without the notes below the text area: the keys and the measurements
     #[arg(long)]
     no_notes: bool,
 }
@@ -119,6 +121,39 @@ enum Reaction {
     Nothing,
 }
 
+/// What is on show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// The start screen, until a key brings the first page
+    Ready,
+    /// The page [`App::page`]
+    Pages,
+    /// The end screen, after the last page
+    Done,
+}
+
+/// The markers that tell `ocrs` what is on show, see [`Signal`].
+struct SignalMarkers {
+    ready: Pattern,
+    done: Pattern,
+    /// By page number
+    pages: Vec<Pattern>,
+}
+
+impl SignalMarkers {
+    fn new(dictionary: &str, corner_ids: [i32; 4]) -> Result<Self> {
+        let signals = Signals::new(dictionary, corner_ids)?;
+        let pattern = |signal| markers::pattern(dictionary, signals.id(signal));
+        Ok(Self {
+            ready: pattern(Signal::Ready)?,
+            done: pattern(Signal::Done)?,
+            pages: (0..PAGE_NUMBERS)
+                .map(|number| pattern(Signal::Page(number)))
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
 struct App {
     file: PathBuf,
     dictionary: String,
@@ -127,6 +162,7 @@ struct App {
     text: String,
     /// The markers of `ids`
     markers: [Pattern; 4],
+    signals: SignalMarkers,
     settings: Settings,
     wrap: Wrap,
     /// Whether the keys and the measurements are shown
@@ -137,7 +173,8 @@ struct App {
     /// The layout for the terminal as it was when it was last drawn on; `None` if it was too small
     geometry: Option<Geometry>,
     pages: Vec<Page>,
-    /// Index of the page on show
+    stage: Stage,
+    /// Index of the page that is on show, or will be when the pages are
     page: usize,
 }
 
@@ -161,6 +198,7 @@ impl App {
             );
         }
         Ok(Self {
+            signals: SignalMarkers::new(&cli.dict, cli.ids)?,
             file: cli.text,
             dictionary: cli.dict,
             ids: cli.ids,
@@ -182,6 +220,7 @@ impl App {
             anchor: (0, 0),
             geometry: None,
             pages: Vec::new(),
+            stage: Stage::Ready,
             page: 0,
         })
     }
@@ -206,20 +245,34 @@ impl App {
             .unwrap_or(0);
     }
 
+    /// Puts a page on show, whatever was before, if there is such a page.
     fn turn_to(&mut self, page: usize) {
         if let Some(lines) = self.pages.get(page) {
+            self.stage = Stage::Pages;
             self.page = page;
             self.anchor = lines[0].at;
         }
     }
 
-    /// On to the next page, and from the last one back to the first.
-    fn turn_over(&mut self) {
-        self.turn_to(if self.page + 1 < self.pages.len() {
-            self.page + 1
-        } else {
-            0
-        });
+    /// On to the next screen: from the start screen to the first page, from the last page to the end
+    /// screen.
+    fn forward(&mut self) {
+        match self.stage {
+            Stage::Ready if !self.pages.is_empty() => self.turn_to(0),
+            Stage::Pages if self.page + 1 < self.pages.len() => self.turn_to(self.page + 1),
+            // only the end screen follows the last page, or a text without any
+            Stage::Ready | Stage::Pages if self.geometry.is_some() => self.stage = Stage::Done,
+            Stage::Ready | Stage::Pages | Stage::Done => {}
+        }
+    }
+
+    /// Back to the page before, and from the end screen to the last page.
+    fn back(&mut self) {
+        match self.stage {
+            Stage::Ready => {}
+            Stage::Pages => self.turn_to(self.page.saturating_sub(1)),
+            Stage::Done => self.turn_to(self.pages.len().saturating_sub(1)),
+        }
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Reaction {
@@ -231,9 +284,9 @@ impl App {
             | KeyCode::Right
             | KeyCode::Down
             | KeyCode::PageDown
-            | KeyCode::Enter => self.turn_to(self.page + 1),
+            | KeyCode::Enter => self.forward(),
             KeyCode::Char('p') | KeyCode::Left | KeyCode::Up | KeyCode::PageUp | KeyCode::Backspace => {
-                self.turn_to(self.page.saturating_sub(1))
+                self.back()
             }
             KeyCode::Char('g') | KeyCode::Home => self.turn_to(0),
             KeyCode::Char('G') | KeyCode::End => self.turn_to(self.pages.len().saturating_sub(1)),
@@ -271,31 +324,68 @@ impl App {
             ];
             return Screen::notice(size.columns, size.rows, &self.settings, &lines);
         };
-        let page = self.pages.get(self.page).map_or(&[][..], Vec::as_slice);
+        let (signal, lines): (_, Cow<[Line]>) = match self.stage {
+            Stage::Ready => {
+                let pace = match self.interval {
+                    Some(seconds) => format!(", a new one every {seconds} s"),
+                    None => String::new(),
+                };
+                let message = format!(
+                    "Ready to show {}: {}{pace}.\n\nPoint the camera at this screen. ocrs says so when it has \
+                     it in view.\n\nEnter starts.",
+                    self.file.display(),
+                    self.page_count()
+                );
+                (&self.signals.ready, self.message(geometry, &message).into())
+            }
+            Stage::Pages => {
+                let page = self.pages.get(self.page).map_or(&[][..], Vec::as_slice);
+                (&self.signals.pages[self.page % PAGE_NUMBERS], page.into())
+            }
+            Stage::Done => {
+                let message = format!(
+                    "End of {}.\n\np goes back, g starts again, q quits.",
+                    self.file.display()
+                );
+                (&self.signals.done, self.message(geometry, &message).into())
+            }
+        };
         let notes = if self.notes {
             self.notes(geometry, size)
         } else {
-            Notes::default()
+            Vec::new()
         };
-        chart::compose(geometry, &self.settings, &self.markers, page, &notes)
+        chart::compose(geometry, &self.settings, &self.markers, signal, &lines, &notes)
     }
 
-    /// The keys, and what the layout measures.
-    fn notes(&self, geometry: &Geometry, size: &Size) -> Notes {
+    /// `2 pages`
+    fn page_count(&self) -> String {
+        match self.pages.len() {
+            1 => "1 page".to_owned(),
+            pages => format!("{pages} pages"),
+        }
+    }
+
+    /// A message of the program's own, laid out like a page of the text.
+    fn message(&self, geometry: &Geometry, message: &str) -> Page {
+        let height = geometry.lines_per_page(self.settings.line_spacing);
+        text::paginate(message, geometry.text.width(), height, Wrap::Word)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// What is on show and what the layout measures, then the keys.
+    fn notes(&self, geometry: &Geometry, size: &Size) -> Vec<String> {
         let settings = &self.settings;
-        let above = [
-            "space/n next page   p previous   g/G first/last",
-            "+/- markers   ]/[ padding   }/{ margin   ./, line spacing",
-            "i invert   b bold   w wrap   h hide these notes   q quit",
-        ];
+        let stage = match self.stage {
+            Stage::Ready => format!("start, {} to come", self.page_count()),
+            Stage::Pages => format!("page {}/{}", self.page + 1, self.pages.len()),
+            Stage::Done => format!("end, {} shown", self.page_count()),
+        };
         let state = format!(
-            "page {}/{} | module {} | margin {} | pad {} | spacing {}",
-            (self.page + 1).min(self.pages.len()),
-            self.pages.len(),
-            settings.module,
-            settings.margin,
-            settings.pad,
-            settings.line_spacing,
+            "{stage} | module {} | margin {} | pad {} | spacing {}",
+            settings.module, settings.margin, settings.pad, settings.line_spacing,
         );
         let mut sizes = format!(
             "{} | text {}x{} cells",
@@ -306,10 +396,15 @@ impl App {
         if let Some((width, height)) = size.cell {
             sizes.push_str(&format!(" | cell {}x{} px", short(width), short(height)));
         }
-        Notes {
-            above: above.map(str::to_owned).to_vec(),
-            below: vec![state, sizes],
-        }
+        let keys = [
+            "enter/space/n next   p previous   g/G first/last page",
+            "+/- markers   ]/[ padding   }/{ margin   ./, line spacing",
+            "i invert   b bold   w wrap   h hide these notes   q quit",
+        ];
+        [state, sizes]
+            .into_iter()
+            .chain(keys.map(str::to_owned))
+            .collect()
     }
 
     /// The command line that starts with the layout as it is now.
@@ -419,10 +514,12 @@ fn run(app: &mut App, terminal: &mut Terminal) -> Result<Size> {
             terminal.draw(&app.screen(&size))?;
             redraw = false;
         }
+        // the pages turn by themselves, the start screen and the end screen wait for a key
         if let Some(at) = turn_at
+            && app.stage == Stage::Pages
             && !event::poll(at.saturating_duration_since(Instant::now()))?
         {
-            app.turn_over();
+            app.forward();
             turn_at = next_turn();
             redraw = true;
             continue;
@@ -497,21 +594,62 @@ mod tests {
         &app.pages[app.page][0].text
     }
 
+    /// Which signal the chart on an 80x24 terminal with the default layout shows: there the signal marker
+    /// has its top-left dot in column 34 and half-row 2, and modules of 2 dots.
+    fn signal_on(screen: &Screen) -> Signal {
+        let signals = Signals::new(DEFAULT_DICTIONARY, DEFAULT_IDS).unwrap();
+        let candidates = [Signal::Ready, Signal::Done]
+            .into_iter()
+            .chain((0..PAGE_NUMBERS).map(Signal::Page));
+        let shown = |signal: &Signal| {
+            let pattern = markers::pattern(DEFAULT_DICTIONARY, signals.id(*signal)).unwrap();
+            (0..36).all(|module| {
+                let (row, column) = (module / 6, module % 6);
+                let dark = screen.dot(34 + 2 * column, 2 + 2 * row) == Rgb::BLACK;
+                dark == pattern.is_dark(row, column)
+            })
+        };
+        let mut matching = candidates.filter(shown);
+        let signal = matching.next().expect("a signal marker");
+        assert_eq!(matching.next(), None);
+        signal
+    }
+
+    const SIZE: Size = Size {
+        columns: 80,
+        rows: 24,
+        cell: None,
+    };
+
     #[test]
-    fn keys_turn_the_pages() {
+    fn keys_turn_the_pages_from_the_start_screen_to_the_end_screen() {
         // 8 lines fit on a page of an 80x24 terminal
         let mut app = app(&numbered_lines(20), &[]);
         app.lay_out(80, 24);
-        assert_eq!((app.pages.len(), first_line(&app)), (3, "line 1"));
-        assert_eq!(press(&mut app, ' '), Reaction::Redraw);
+        assert_eq!((app.stage, app.pages.len()), (Stage::Ready, 3));
+        // nothing comes before the start screen
+        press(&mut app, 'p');
+        assert_eq!(app.stage, Stage::Ready);
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Reaction::Redraw
+        );
+        assert_eq!((app.stage, first_line(&app)), (Stage::Pages, "line 1"));
+        press(&mut app, ' ');
         assert_eq!(first_line(&app), "line 9");
-        press(&mut app, 'n');
         press(&mut app, 'n');
         assert_eq!(first_line(&app), "line 17");
         press(&mut app, 'p');
         assert_eq!(first_line(&app), "line 9");
         press(&mut app, 'G');
         assert_eq!(first_line(&app), "line 17");
+        // after the last page comes the end screen, and after that nothing
+        press(&mut app, 'n');
+        assert_eq!(app.stage, Stage::Done);
+        press(&mut app, 'n');
+        assert_eq!(app.stage, Stage::Done);
+        press(&mut app, 'p');
+        assert_eq!((app.stage, first_line(&app)), (Stage::Pages, "line 17"));
         press(&mut app, 'g');
         assert_eq!(first_line(&app), "line 1");
         assert_eq!(press(&mut app, 'x'), Reaction::Nothing);
@@ -519,23 +657,91 @@ mod tests {
     }
 
     #[test]
-    fn turning_over_starts_again_after_the_last_page() {
+    fn every_screen_says_what_it_is() {
+        // 17 pages, one more than there are page numbers
+        let mut app = app(&numbered_lines(8 * 17), &[]);
+        app.lay_out(80, 24);
+        let texts = |app: &App| {
+            let runs = app.screen(&SIZE).runs;
+            runs.into_iter()
+                .map(|run| run.text)
+                .collect::<Vec<_>>()
+                .join(" / ")
+        };
+
+        assert_eq!(signal_on(&app.screen(&SIZE)), Signal::Ready);
+        let start = texts(&app);
+        assert!(
+            start.contains("17 pages") && start.contains("Enter starts."),
+            "{start}"
+        );
+        assert!(start.contains("start, 17 pages to come | module 2"), "{start}");
+
+        for page in 0..17 {
+            press(&mut app, ' ');
+            assert_eq!(
+                signal_on(&app.screen(&SIZE)),
+                Signal::Page(page % 16),
+                "page {page}"
+            );
+        }
+        assert!(texts(&app).contains("page 17/17 | module 2"));
+
+        press(&mut app, ' ');
+        assert_eq!(signal_on(&app.screen(&SIZE)), Signal::Done);
+        let end = texts(&app);
+        assert!(
+            end.contains("End of") && end.contains("end, 17 pages shown | module 2"),
+            "{end}"
+        );
+    }
+
+    #[test]
+    fn start_screen_tells_the_pace() {
+        let mut app = app("one page", &["--interval", "2.5"]);
+        app.lay_out(80, 24);
+        let runs = app.screen(&SIZE).runs;
+        let start = runs.into_iter().map(|run| run.text).collect::<Vec<_>>().join(" ");
+        assert!(start.contains("1 page, a new one every 2.5 s."), "{start}");
+    }
+
+    #[test]
+    fn pages_go_forward_up_to_the_end_screen() {
         let mut app = app(&numbered_lines(20), &[]);
         app.lay_out(80, 24);
         let mut seen = Vec::new();
-        for _ in 0..4 {
-            app.turn_over();
+        for _ in 0..5 {
+            app.forward();
             app.lay_out(80, 24);
-            seen.push(first_line(&app).to_owned());
+            seen.push((app.stage, first_line(&app).to_owned()));
         }
-        assert_eq!(seen, ["line 9", "line 17", "line 1", "line 9"]);
+        let page = |line: &str| (Stage::Pages, line.to_owned());
+        let end = (Stage::Done, "line 17".to_owned());
+        assert_eq!(
+            seen,
+            [page("line 1"), page("line 9"), page("line 17"), end.clone(), end]
+        );
+    }
+
+    #[test]
+    fn text_without_pages_goes_from_the_start_to_the_end() {
+        let mut app = app("\n\n", &[]);
+        app.lay_out(80, 24);
+        assert!(app.pages.is_empty());
+        assert_eq!(signal_on(&app.screen(&SIZE)), Signal::Ready);
+        press(&mut app, ' ');
+        assert_eq!(app.stage, Stage::Done);
+        press(&mut app, 'p');
+        press(&mut app, 'g');
+        assert_eq!(app.stage, Stage::Done);
     }
 
     #[test]
     fn page_on_show_survives_a_new_layout() {
         let mut app = app(&numbered_lines(100), &[]);
         app.lay_out(80, 24);
-        for _ in 0..5 {
+        // from the start screen to the sixth page
+        for _ in 0..6 {
             press(&mut app, ' ');
         }
         assert_eq!(first_line(&app), "line 41");
@@ -562,10 +768,10 @@ mod tests {
         let mut app = app(&"word ".repeat(400), &[]);
         app.lay_out(80, 24);
         assert!(app.pages.len() > 2);
-        press(&mut app, ' ');
-        assert_eq!(app.page, 1);
-        press(&mut app, ' ');
-        assert_eq!(app.page, 2);
+        for page in 0..3 {
+            press(&mut app, ' ');
+            assert_eq!(app.page, page);
+        }
         press(&mut app, 'p');
         assert_eq!(app.page, 1);
     }
@@ -598,6 +804,9 @@ mod tests {
             cell: None,
         };
         assert!(app.screen(&size).runs[0].text.contains("80x24 cells are too few"));
+        // and no way off the start screen
+        press(&mut app, ' ');
+        assert_eq!(app.stage, Stage::Ready);
         for _ in 0..14 {
             press(&mut app, '-');
         }
@@ -642,6 +851,7 @@ mod tests {
         let mut app = app(&numbered_lines(20), &[]);
         app.lay_out(80, 24);
         press(&mut app, ' ');
+        press(&mut app, ' ');
         let size = Size {
             columns: 80,
             rows: 24,
@@ -649,7 +859,7 @@ mod tests {
         };
         let geometry = app.geometry.clone().unwrap();
         assert_eq!(
-            app.notes(&geometry, &size).below,
+            app.notes(&geometry, &size)[..2],
             [
                 "page 2/3 | module 2 | margin 1 | pad 1 | spacing 0",
                 "marker 12x6 cells = 108x117 px | text 48x8 cells | cell 9x19.5 px"

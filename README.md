@@ -1,16 +1,16 @@
 # ocrs
 
 Reads the text between four ArUco / AprilTag markers in every frame of a video and appends it to a text file.
-A frame that shows the same text as the frame before it is skipped. Written in Rust on top of OpenCV, with the
-image warping and the neural networks running on CUDA.
+A text is recorded once, when most of the recent frames agree on it. Written in Rust on top of OpenCV, with
+the image warping and the neural networks running on CUDA.
 
 Per frame:
 
 1. find the four markers (`objdetect::ArucoDetector`) and take the area they enclose;
 2. warp that area into an upright page (`cuda::warpPerspective`);
 3. detect the text lines and read each of them (PP-OCRv5 models on OpenCV DNN's CUDA backend);
-4. put the lines into reading order and compare the text with the previous frame's;
-5. if it is new, append it to the output file and flush.
+4. put the lines into reading order and wait until most of the recent frames read that text;
+5. if it differs from the text recorded before, append it to the output file and flush.
 
 ## Building
 
@@ -62,8 +62,10 @@ ocrs 'scan_%04d.png' -o scans.txt --device cpu                # image sequence, 
 | `--ids` | `0,1,2,3` | ids of the markers at the top-left, top-right, bottom-right, bottom-left corner |
 | `--device` | `cuda` | `cpu` runs everything without a GPU (slow, meant for testing) |
 | `--camera-size` | the camera's own | frame size to ask a camera for, `WIDTHxHEIGHT`; see below |
+| `--preview` | off | show what the camera sees on the terminal, with the markers that are found; see below |
 | `--page-size` | from the first frame | size in pixels the text area is rectified to, `WIDTHxHEIGHT` |
-| `--similarity` | `0.9` | how alike two consecutive texts must be to count as the same content |
+| `--stable` | `3`, pictures `1` | how many frames must read a text before it is recorded, see [Output](#output) |
+| `--similarity` | `0.9` | how alike two texts must be to count as the same content |
 | `--separator` | none | a line to write between the texts of two frames |
 | `--dump-pages` | off | directory to save the rectified text area of every recorded frame to |
 | `--det-model`, `--rec-model`, `--rec-dict` | built in | other PP-OCR models, see [models/README.md](models/README.md) |
@@ -75,6 +77,14 @@ page of text. `--camera-size 1920x1080` asks for more. `ocrs` says which size th
 if the camera does not have the size asked for, that is the nearest one it has, and
 `v4l2-ctl --list-formats-ext` lists them all. USB cameras tend to have their large sizes as Motion JPEG
 only, so `ocrs` switches to that where the size asked for is not to be had uncompressed.
+
+To point the camera, `--preview` draws what it sees on the terminal that `ocrs` runs in, a frame at a time,
+as coarse as the terminal has character cells (a smaller font gives a finer picture). In the picture the
+text area and its four markers are outlined in green as far as they are found, the signal marker of
+`ocrs-show` in cyan, markers with other ids in magenta, and squares that look like a marker but can't be
+read (too small, blurred or outshone) in red. The lines below it name the markers that are found and those
+that are missing, and say what is in view. Reading goes on as without the preview; what `ocrs` would
+otherwise write to the terminal while it runs is printed when it ends. `q` ends it.
 
 ### Markers
 
@@ -94,13 +104,20 @@ upright however the camera is turned. A frame is skipped unless all four markers
 
 ### Output
 
-The text of a recorded frame is written as one line per text line, top to bottom; pieces of text on the same
-row are joined by a space. The file is flushed after every recorded frame.
+A recorded text is written as one line per text line, top to bottom; pieces of text on the same row are
+joined by a space. The file is flushed after every text.
 
-`--similarity 0.9` treats two consecutive frames as the same content when at most a tenth of their characters
-differ (edit distance relative to the longer text). With a camera, the reading of an unchanged page flickers by
-a character now and then, and comparing for equality would record such a page many times. Use `--similarity 1`
-to skip only identical texts.
+A single frame of a camera is not to be trusted: one taken while the camera moves is blurred, and one taken
+while the page changes shows two pages at once. So a text is only recorded once `--stable 3` of the last 5
+frames agree on it (N of the last 2N-1), and of the readings that agree, the one that is most like the
+others is written, which tends to be the one with the fewest misread characters. Pictures are views of their
+own with nothing to agree on, so for a picture or a sequence of pictures the default is `--stable 1`, which
+records what every frame reads.
+
+`--similarity 0.9` lets two texts count as the same content when at most a tenth of their characters differ
+(edit distance relative to the longer text). That decides whether frames agree, and whether a text repeats
+the one recorded before it and is skipped. With a camera, the reading of an unchanged page flickers by a
+character now and then, so asking for equal texts with `--similarity 1` would record little or far too much.
 
 ## Test target: `ocrs-show`
 
@@ -108,9 +125,20 @@ to skip only identical texts.
 terminal the whole chain can be tried out: what `ocrs` writes should be the text that is on show.
 
 ```sh
-ocrs-show tests/sample.txt                    # in a terminal the camera sees
-ocrs 0 -o read.txt --camera-size 1920x1080    # in another one
+ocrs-show tests/sample.txt --interval 2                 # in a terminal the camera sees
+ocrs 0 -o read.txt --camera-size 1920x1080 --preview    # in another one
 ```
+
+`ocrs-show` begins on a start screen and waits there. `ocrs` says when it has that screen in view, which is
+the moment to press `enter`: the pages follow, by key or every `--interval` seconds, and after the last one
+an end screen, at which `ocrs` stops by itself.
+
+Between the top two markers there is a fifth one, which tells `ocrs` what is on show: the start screen, the
+end screen, or a page and its number (counted up to 16 and then from 0 again). With that `ocrs` need not
+guess from the text where one page ends and the next begins. It records each page once, as soon as enough
+of its frames agree, and does not read the rest of them; a page that goes away before that is recorded with
+its likeliest reading and a remark. It follows that `ocrs` does not need to be told how long a page stays;
+the interval only has to be long enough for `--stable` frames of the camera.
 
 `tests/sample.txt` is a text for this: some 1,900 words of prose with tables, figures, every printable ASCII
 character and the characters that are easily taken for one another.
@@ -129,12 +157,13 @@ rest is set with options, and most of it with keys as well while the chart is on
 | `--invert` | `i` | off | light text on a dark panel |
 | `--bold` | `b` | off | bold text |
 | `--wrap` | `w` | `word` | `none` cuts lines that are too long off instead of continuing them on the next row |
-| `--no-notes` | `h` | shown | the keys and the measurements above and below the text area, which `ocrs` does not read |
+| `--no-notes` | `h` | shown | the keys and the measurements below the text area, which `ocrs` does not read |
 | `--ink`, `--paper` | | `000000`, `ffffff` | the dark and the light colour as `RRGGBB`; a grey paper dims a screen that glares |
-| `--interval` | | off | seconds after which the next page comes up by itself, the first one after the last |
+| `--interval` | | off | seconds after which the next page comes up by itself, up to the end screen |
 | `--dict`, `--ids` | | `4x4_50`, `0,1,2,3` | the markers, to be given to `ocrs` the same way |
 
-`space` and `p` turn the pages; a form feed character in the file starts a new one. `q` quits and prints the
+`space` and `p` turn the pages, `enter` does what `space` does; a form feed character in the file starts a
+new page. `q` quits and prints the
 options for the layout as it was then, along with what the terminal measured, so that a setup that read well
 can be noted down and shown again:
 
