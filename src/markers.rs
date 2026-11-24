@@ -1,6 +1,6 @@
 //! Finds the text area from the four fiducial markers around it.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use opencv::core::{Mat, Point2f, Vector};
 use opencv::objdetect::{
     self, ArucoDetector, CornerRefineMethod, DetectorParameters, PredefinedDictionaryType as Dictionary,
@@ -57,6 +57,81 @@ pub fn parse_dictionary(name: &str) -> Result<Dictionary> {
         })
 }
 
+/// The ids of the four markers as they are given on a command line: `TL,TR,BR,BL`.
+pub fn parse_ids(text: &str) -> Result<[i32; 4]> {
+    let ids = text
+        .split(',')
+        .map(|id| {
+            id.trim()
+                .parse::<i32>()
+                .map_err(|_| anyhow!("{id:?} is not a marker id, expected four numbers as TL,TR,BR,BL"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let ids: [i32; 4] = ids
+        .try_into()
+        .map_err(|ids: Vec<i32>| anyhow!("expected four marker ids as TL,TR,BR,BL, got {}", ids.len()))?;
+    ensure_distinct(&ids)?;
+    Ok(ids)
+}
+
+/// The four markers of a text area are told apart by id alone, so their ids have to differ.
+fn ensure_distinct(ids: &[i32; 4]) -> Result<()> {
+    for (index, id) in ids.iter().enumerate() {
+        ensure!(
+            !ids[..index].contains(id),
+            "the four marker ids must differ, {id} is given twice"
+        );
+    }
+    Ok(())
+}
+
+/// Width in modules of the black border around a marker's bits, the one the detector expects by default.
+const BORDER_MODULES: i32 = 1;
+
+/// One marker as a square grid of black and white modules, its border included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pattern {
+    side: usize,
+    dark: Vec<bool>,
+}
+
+impl Pattern {
+    /// Modules along one side, border included: 6 for a 4x4 dictionary.
+    pub fn side(&self) -> usize {
+        self.side
+    }
+
+    /// Whether the module in `row` and `column`, counted from the top-left corner, is black.
+    pub fn is_dark(&self, row: usize, column: usize) -> bool {
+        self.dark[row * self.side + column]
+    }
+}
+
+/// The marker `id` of a dictionary, to draw it on something that is not an image.
+pub fn pattern(dictionary: &str, id: i32) -> Result<Pattern> {
+    let predefined = objdetect::get_predefined_dictionary(parse_dictionary(dictionary)?)?;
+    let count = predefined.bytes_list().rows();
+    ensure!(
+        (0..count).contains(&id),
+        "dictionary {dictionary} has the marker ids 0 to {}, not {id}",
+        count - 1
+    );
+    let side = predefined.marker_size() + 2 * BORDER_MODULES;
+    // drawn at one pixel per module, the image is the grid of modules
+    let mut image = Mat::default();
+    objdetect::generate_image_marker(&predefined, id, side, &mut image, BORDER_MODULES)?;
+    let mut dark = Vec::with_capacity((side * side) as usize);
+    for row in 0..side {
+        for column in 0..side {
+            dark.push(*image.at_2d::<u8>(row, column)? < 128);
+        }
+    }
+    Ok(Pattern {
+        side: side as usize,
+        dark,
+    })
+}
+
 /// Detects the four markers and reports the area they enclose.
 pub struct Locator {
     detector: ArucoDetector,
@@ -67,12 +142,7 @@ impl Locator {
     /// `ids` are the markers at the top-left, top-right, bottom-right and bottom-left corner of the area.
     /// Telling them apart by id is what gives the page its orientation, so they have to differ.
     pub fn new(dictionary: &str, ids: [i32; 4]) -> Result<Self> {
-        for (index, id) in ids.iter().enumerate() {
-            ensure!(
-                !ids[..index].contains(id),
-                "the four marker ids must differ, {id} is given twice"
-            );
-        }
+        ensure_distinct(&ids)?;
         let dictionary = objdetect::get_predefined_dictionary(parse_dictionary(dictionary)?)?;
         let mut parameters = DetectorParameters::default()?;
         // marker corners end up as page corners, so they are worth the sub-pixel pass
@@ -145,6 +215,52 @@ mod tests {
     #[test]
     fn duplicate_ids_are_rejected() {
         assert!(Locator::new("4x4_50", [0, 1, 2, 1]).is_err());
+    }
+
+    #[test]
+    fn ids_are_four_different_numbers_between_commas() {
+        assert_eq!(parse_ids("10,11,12,13").unwrap(), [10, 11, 12, 13]);
+        assert_eq!(parse_ids(" 3, 2,1 ,0").unwrap(), [3, 2, 1, 0]);
+        for (wrong, reason) in [
+            ("1,2,3", "got 3"),
+            ("1,2,3,4,5", "got 5"),
+            ("1,2,3,x", "\"x\" is not a marker id"),
+            ("1 2 3 4", "is not a marker id"),
+            ("", "is not a marker id"),
+            ("1,2,3,1", "1 is given twice"),
+        ] {
+            let error = parse_ids(wrong).unwrap_err().to_string();
+            assert!(error.contains(reason), "{wrong:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn pattern_is_the_bits_inside_a_black_border() -> Result<()> {
+        let marker = pattern("4x4_50", 3)?;
+        assert_eq!(marker.side(), 6);
+        for at in 0..6 {
+            for (row, column) in [(0, at), (5, at), (at, 0), (at, 5)] {
+                assert!(marker.is_dark(row, column), "border module {row},{column}");
+            }
+        }
+        let white = (1..5)
+            .flat_map(|row| (1..5).map(move |column| (row, column)))
+            .filter(|&(row, column)| !marker.is_dark(row, column))
+            .count();
+        assert!(
+            (1..16).contains(&white),
+            "{white} white modules among the 16 bits"
+        );
+        assert_ne!(marker, pattern("4x4_50", 4)?);
+        assert_eq!(pattern("apriltag_36h11", 0)?.side(), 8);
+        Ok(())
+    }
+
+    #[test]
+    fn pattern_of_an_id_outside_the_dictionary_is_an_error() {
+        let error = pattern("4x4_50", 50).unwrap_err().to_string();
+        assert!(error.contains("0 to 49"), "{error}");
+        assert!(pattern("4x4_50", -1).is_err());
     }
 
     /// A square marker outline, listed clockwise starting from the corner that `start` selects.

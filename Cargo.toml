@@ -10,11 +10,15 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
+# the package also builds the test target `ocrs-show`, see src/bin
+default-run = "ocrs"
 description = "OCR for video frames whose text area is framed by ArUco markers, accelerated with CUDA"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# ocrs-show: drawing on the terminal and reading its keys
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
 # Bindings for the OpenCV that `opencv-vendored` builds from third_party/opencv (see third_party/README.md)
 # "clang-runtime": the build script looks libclang up when it runs instead of linking against it, so a
 # libclang outside the dynamic loader's search path works too
@@ -28,3 +32,5 @@ opencv = { path = "third_party/opencv-rust", default-features = false, features 
     "videoio",
 ] }
 opencv-vendored = { path = "crates/opencv-vendored" }
+# ocrs-show: how many terminal columns a piece of text takes
+unicode-width = "0.2"

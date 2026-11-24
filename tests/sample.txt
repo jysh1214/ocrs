@@ -1,0 +1,117 @@
+Notes from the Weather Station on Greyfell
+
+1. The station
+
+The station on Greyfell is a stone hut with a tin roof, built in 1931 at 1,412 metres above the sea and kept running ever since. Two people live in it at a time, for six weeks, and then two others walk up and take their place. Nothing about the work is hard. It asks only that somebody goes outside every three hours, day and night, in every kind of weather, and writes down what the instruments say.
+
+I came up on the third of March with a rucksack, a box of books and a great deal of confidence. Marta, who has done eleven winters here, looked at my boots, said nothing, and put the kettle on. By the end of the first week I had learned that confidence is not the same thing as dry socks, and that the hut is warm only within two steps of the stove.
+
+The path from the valley takes four hours in summer and anything up to nine in snow. It starts behind the church in Ollen, crosses the river twice, climbs through the pines and then leaves the trees behind for good. From there on it is marked by iron poles, 40 paces apart, painted red at the top. In fog you walk from one pole to the next and do not think about the rest.
+
+People in the valley ask why anybody still needs us, now that a box of electronics on a mast could send the same numbers down a wire. The honest answer is that the box has been tried, twice, and that both times the ice took it before Christmas. A person can knock the ice off. A person also notices things that nobody asked about: the smell before a thunderstorm, the day the swifts leave, the particular grey of a sky that means snow by evening.
+
+2. A day, hour by hour
+
+The day begins at 06:00 with the first reading. You take the lantern, even in summer, because the screen that holds the thermometers faces north and stands in its own shadow. You read the dry bulb, then the wet bulb, then the minimum and the maximum, and you write each number down before you look at the next one. Marta is strict about this. A number that you carry in your head for ten seconds, she says, is already half invented.
+
+At 06:20 the figures go down to the valley by radio. The operator in Ollen is called Henrik and he repeats everything back, slowly, as if he were reading to a child. "Pressure 856.3, falling. Temperature minus 4.1. Wind north-west, 9 metres a second, gusts to 15." Then he asks how we slept, and whether we need anything, and we always say bread.
+
+Breakfast is porridge. After breakfast one of us clears the snow from the door, the path and the instruments, and the other one writes up the log. At 09:00 there is the second reading, at 12:00 the third, and so on around the clock: 15:00, 18:00, 21:00, midnight and 03:00. We share the night between us, so each of us gets five hours of sleep in one piece, which is enough once you stop arguing with it.
+
+The afternoon belongs to repairs. Something is always broken. In my first month we mended the stove door, two window catches, the handle of the big shovel, the rain gauge (twice) and the wire that holds the chimney upright. Marta mends things the way other people knit, without looking, while she talks about something else.
+
+In the evening we cook, wash up, read, and listen to the wind. You learn to tell its speed from the sound it makes in the chimney: a hum at 10 metres a second, a howl at 20, and above 30 a kind of silence, because by then the whole hut is one note and the ear gives up.
+
+3. The instruments
+
+Instrument          Unit      Read every
+Dry thermometer     deg C     3 hours
+Wet thermometer     deg C     3 hours
+Barometer           hPa       3 hours
+Anemometer          m/s       3 hours
+Wind vane           degrees   3 hours
+Rain gauge          mm        12 hours
+Snow stake          cm        24 hours
+Sunshine recorder   hours     24 hours
+
+The barometer is the oldest thing in the hut. It was made in 1926 by a firm in Bergen that no longer exists, and it hangs on the inside wall where the temperature changes least. Its glass has a small crack in one corner, which everybody who has ever worked here has been blamed for.
+
+The snow stake is simply a pole with centimetres painted on it, set in a flat place 30 metres from the door. On 14 February 1988 the snow reached 412 cm and buried it altogether; the observers that winter tied a broom handle to the top and went on measuring.
+
+4. Some figures from the log
+
+Highest temperature on record: 24.6 degrees, on 29 July 1947. Lowest: minus 31.8 degrees, on 9 January 1985. Highest wind: 51 metres a second, on 2 December 1999, after which the anemometer was found 600 metres away, in good condition. Wettest day: 118.4 mm of rain on 17 September 1962. Longest fog: 13 days and 7 hours in November 2004.
+
+In an ordinary year the station counts 141 days with snow on the ground, 96 days of fog, 23 thunderstorms and about 1,640 hours of sunshine. The mean temperature for the whole year is 0.7 degrees, which sounds mild until you notice that it is the average of some very different months: minus 8.9 in January, plus 9.8 in July.
+
+March 2026, week by week:
+
+Week   Mean temp   Snow depth   Sunshine
+1      -6.4 C      187 cm       21.5 h
+2      -3.9 C      201 cm       14.0 h
+3      -5.2 C      196 cm       33.25 h
+4      -1.7 C      178 cm       40.75 h
+
+5. Supplies
+
+Everything we eat and burn comes up on somebody's back, or in good weather on the back of a mule called Brandy. The list for six weeks, two people:
+
+   40 kg flour            18.00
+   12 kg oats              9.60
+   10 kg dried beans      14.50
+    6 kg coffee           57.00
+    5 kg sugar             4.75
+    3 kg salt butter      27.90
+   24 tins of fish        38.40
+   20 l paraffin          31.00
+  300 kg coal            126.00
+  Total                  327.15
+
+The total is in crowns and is paid by the Institute, account no. 7045-22-91836, reference GREYFELL/2026/03. Questions about the bill go to stores@greyfell-station.example, never to us.
+
+6. A storm
+
+On the nineteenth the pressure began to fall at breakfast and did not stop. By noon it had dropped 11 hPa and the sky in the west had gone the colour of slate. Marta looked at the barograph, then at me, and said that today I would learn something. We carried in coal for three days, filled every pot with water, tied down the shutters and roped the door of the instrument screen.
+
+The wind arrived at 16:40, all at once, like a train coming out of a tunnel. At the 18:00 reading it was blowing 27 metres a second and I went out on a rope, on my hands and knees, with the notebook inside my shirt. It took me 14 minutes to cover 30 metres and read four thermometers. When I came back in, Marta took the notebook, checked the figures, and then, for the first time since I had arrived, poured me a glass of the brandy that is kept for emergencies.
+
+At 21:00 it was her turn. At midnight it was mine again, and by then the gusts had passed 40. I remember very little of that reading except the noise, and the fact that the lantern went out twice, and that I wrote the numbers in the dark and found them next morning, crooked but correct, running diagonally across the page.
+
+The storm blew itself out towards dawn. At 06:00 the air was perfectly still, the sky was green in the east, and the snow lay in long curved ridges that had not been there the day before. Every instrument was in its place. We had lost one shutter, eleven roof nails and the washing line. Henrik, on the radio, said that in the valley they had not slept either, and asked whether we needed anything. We said bread.
+
+7. Things that are easy to mistake
+
+Some characters look alike, and a careless observer will write one for the other. The log has a page of them for practice:
+
+O 0 o Q D        l 1 I | !        S 5 s $
+B 8 3 E          Z 2 z 7          G 6 b C
+rn m nn          cl d ol          vv w uu
+U V u v          g q 9 y          . , : ; ' `
+
+Illegal lilies fill the hill. 1,001 nights, 10,110 lights. O0O0 oOoO 0o0o.
+Room 101 or Room 1O1? Flight B8 or Flight 88? Size 5S or Size S5?
+modern morning, burn bum, clear dear, vvave wave, minimum, million, illicit.
+
+8. Signs and marks
+
+The log also uses a good many signs. Question marks for doubt (was it 3.5 or 8.5?), brackets for readings that were taken late (21:10), square brackets for [estimated] values and curly ones for {instrument faults}. An asterisk * marks a record. A hash # numbers the storms: #1 of 2026 came on 6 January. Percent is for humidity, 87% this morning; the ampersand is for Marta & me. Slashes divide the watch, 03:00/06:00, and the cloud, 6/8. Plus and minus are obvious: +2.4, -11.0. So are less and more: wind < 5 m/s, gusts > 30 m/s. An equals sign ends the sums: 12.5 + 7.25 = 19.75. A caret ^ points at a correction, a tilde ~ means roughly, an underscore joins file_names_like_this, a dollar sign $ is for the things we order from abroad, and a backslash \ is used by nobody at all.
+
+"Is the kettle on?" "It's always on." 'Then pour.'
+
+9. Every letter
+
+The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow. The five boxing wizards jump quickly.
+
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+0123456789
+
+THE STATION STANDS AT 1,412 METRES. KEEP THE DOOR SHUT. KNOCK THE ICE OFF THE MAST BEFORE EVERY READING. WRITE THE NUMBER DOWN BEFORE YOU LOOK AT THE NEXT ONE.
+
+10. Going down
+
+My six weeks ended on the fourteenth of April. The two who came to relieve us arrived at noon, red in the face, carrying bread. I showed the new man the stove, the rope, the trick with the screen door, and heard myself telling him, in Marta's voice, to write each number down before he looked at the next.
+
+Going down took three hours and a half. At the last iron pole I turned around. The hut was a grey dot under a grey ridge, with a thread of smoke standing straight up from it, which meant no wind at all: force 0, calm, the rarest entry in the whole log. I wrote it down before I looked at anything else.
+
+In the valley the apple trees were in flower and nobody was wearing a coat. Henrik met me at the bridge. He is younger than he sounds, and shorter, and he had brought a loaf.
