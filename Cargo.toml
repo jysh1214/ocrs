@@ -14,6 +14,13 @@ publish = false
 default-run = "ocrs"
 description = "OCR for video frames whose text area is framed by ArUco markers, accelerated with CUDA"
 
+[features]
+default = ["cuda"]
+# CUDA for the image warping and the neural networks. Without it (`--no-default-features`) OpenCV is built
+# without CUDA as well, which takes neither the CUDA toolkit nor cuDNN, and everything runs on the CPU:
+# all that `ocrs-show` needs, and `ocrs --device cpu`.
+cuda = ["opencv/cudawarping", "opencv-vendored/cuda"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -24,7 +31,6 @@ crossterm = { version = "0.29", default-features = false, features = ["events"] 
 # libclang outside the dynamic loader's search path works too
 opencv = { path = "third_party/opencv-rust", default-features = false, features = [
     "clang-runtime",
-    "cudawarping",
     "dnn",
     "imgcodecs",
     "imgproc",

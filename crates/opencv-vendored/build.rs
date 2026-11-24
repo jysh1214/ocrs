@@ -1,9 +1,14 @@
-//! Builds `third_party/opencv` (+ `third_party/opencv_contrib`) with CUDA and installs it under
-//! `third_party/_install/opencv`.
+//! Builds `third_party/opencv` and installs it under `third_party/_install`, in one of two ways:
 //!
-//! The build tree lives in `third_party/_build/opencv` rather than in `OUT_DIR` on purpose: `OUT_DIR` is
-//! per profile and changes with every toolchain update, and recompiling OpenCV's CUDA code takes a long
-//! time. CMake keeps the tree incremental, and a stamp file lets an up-to-date tree skip CMake entirely.
+//! * with the feature `cuda`: with CUDA and the CUDA modules of `third_party/opencv_contrib`, into
+//!   `_install/opencv`;
+//! * without it: without CUDA, which takes neither the CUDA toolkit nor cuDNN nor `opencv_contrib`, into
+//!   `_install/opencv-cpu`.
+//!
+//! The two are separate builds that don't disturb each other. Their trees live in `third_party/_build`
+//! rather than in `OUT_DIR` on purpose: `OUT_DIR` is per profile and changes with every toolchain update,
+//! and recompiling OpenCV, its CUDA code above all, takes a long time. CMake keeps a tree incremental, and
+//! a stamp file lets an up-to-date tree skip CMake entirely.
 //!
 //! Environment variables (all optional):
 //! * `CMAKE`: cmake executable, default `cmake` from `PATH`
@@ -20,16 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// OpenCV modules the application uses. `BUILD_LIST` adds whatever these depend on.
-const MODULES: &[&str] = &[
-    "core",
-    "imgproc",
-    "imgcodecs",
-    "videoio",
-    "objdetect",
-    "dnn",
-    "cudev",
-    "cudawarping",
-];
+const MODULES: &[&str] = &["core", "imgproc", "imgcodecs", "videoio", "objdetect", "dnn"];
+/// And those it uses on top with CUDA, from `opencv_contrib`.
+const CUDA_MODULES: &[&str] = &["cudev", "cudawarping"];
 
 /// Variables that change the result of the build; cargo re-runs this script when one of them changes.
 const ENV_VARS: &[&str] = &[
@@ -51,10 +49,13 @@ fn main() {
         .join("../../third_party")
         .canonicalize()
         .expect("third_party/ directory next to crates/");
+    let cuda = env::var_os("CARGO_FEATURE_CUDA").is_some();
     let opencv_src = third_party.join("opencv");
-    let contrib_src = third_party.join("opencv_contrib");
-    let build_dir = third_party.join("_build/opencv");
-    let prefix = third_party.join("_install/opencv");
+    // the extra modules are only needed for CUDA; without it their checkout may be missing
+    let contrib_src = cuda.then(|| third_party.join("opencv_contrib"));
+    let name = if cuda { "opencv" } else { "opencv-cpu" };
+    let build_dir = third_party.join("_build").join(name);
+    let prefix = third_party.join("_install").join(name);
     let stamp = prefix.join(STAMP_NAME);
 
     println!("cargo::rerun-if-changed=build.rs");
@@ -62,9 +63,13 @@ fn main() {
     for var in ENV_VARS {
         println!("cargo::rerun-if-env-changed={var}");
     }
-    let revisions = [&opencv_src, &contrib_src].map(|dir| source_revision(dir));
+    let revisions = [Some(&opencv_src), contrib_src.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|dir| source_revision(dir))
+        .collect::<Vec<_>>();
 
-    let args = cmake_args(&opencv_src, &contrib_src, &prefix);
+    let args = cmake_args(&opencv_src, contrib_src.as_deref(), &prefix);
     let wanted_stamp = format!("{}\n{}\n", revisions.join("\n"), args.join("\n"));
     let up_to_date = fs::read_to_string(&stamp).is_ok_and(|have| have == wanted_stamp);
     if !up_to_date {
@@ -106,7 +111,14 @@ fn source_revision(dir: &Path) -> String {
     git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown revision".to_string())
 }
 
-fn cmake_args(opencv_src: &Path, contrib_src: &Path, prefix: &Path) -> Vec<String> {
+/// The CMake command line. `contrib_src` is the checkout of the extra modules for a build with CUDA, and
+/// `None` for one without.
+fn cmake_args(opencv_src: &Path, contrib_src: Option<&Path>, prefix: &Path) -> Vec<String> {
+    let cuda = contrib_src.is_some();
+    let mut modules = MODULES.to_vec();
+    if cuda {
+        modules.extend(CUDA_MODULES);
+    }
     let mut args = vec![
         "-S".to_string(),
         opencv_src.display().to_string(),
@@ -116,16 +128,18 @@ fn cmake_args(opencv_src: &Path, contrib_src: &Path, prefix: &Path) -> Vec<Strin
         // the installed libraries find each other, and keep finding CUDA / cuDNN in non-default locations
         "-DCMAKE_INSTALL_RPATH=$ORIGIN".to_string(),
         "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON".to_string(),
-        format!(
+    ];
+    if let Some(contrib_src) = contrib_src {
+        args.push(format!(
             "-DOPENCV_EXTRA_MODULES_PATH={}",
             contrib_src.join("modules").display()
-        ),
-        format!("-DBUILD_LIST={}", MODULES.join(",")),
-    ];
+        ));
+    }
+    args.push(format!("-DBUILD_LIST={}", modules.join(",")));
     if which("ninja") {
         args.push("-GNinja".to_string());
     }
-    let fixed = [
+    let common = [
         "-DBUILD_SHARED_LIBS=ON",
         "-DBUILD_TESTS=OFF",
         "-DBUILD_PERF_TESTS=OFF",
@@ -136,9 +150,11 @@ fn cmake_args(opencv_src: &Path, contrib_src: &Path, prefix: &Path) -> Vec<Strin
         "-DBUILD_opencv_python2=OFF",
         "-DBUILD_opencv_python3=OFF",
         "-DOPENCV_GENERATE_PKGCONFIG=OFF",
-        // CUDA: device code through CMake's own CUDA language support (FindCUDA is gone from current CMake),
-        // DNN inference through cuDNN. Asking for OPENCV_DNN_CUDA explicitly turns a missing cuDNN into a
-        // configure error instead of a silent CPU-only DNN module.
+    ];
+    // CUDA: device code through CMake's own CUDA language support (FindCUDA is gone from current CMake),
+    // DNN inference through cuDNN. Asking for OPENCV_DNN_CUDA explicitly turns a missing cuDNN into a
+    // configure error instead of a silent CPU-only DNN module.
+    let with_cuda = [
         "-DWITH_CUDA=ON",
         "-DENABLE_CUDA_FIRST_CLASS_LANGUAGE=ON",
         "-DWITH_CUBLAS=ON",
@@ -147,6 +163,9 @@ fn cmake_args(opencv_src: &Path, contrib_src: &Path, prefix: &Path) -> Vec<Strin
         "-DWITH_CUFFT=OFF",
         "-DWITH_NVCUVID=OFF",
         "-DWITH_NVCUVENC=OFF",
+    ];
+    let without_cuda = ["-DWITH_CUDA=OFF"];
+    let rest = [
         // video files and cameras
         "-DWITH_FFMPEG=ON",
         "-DWITH_V4L=ON",
@@ -174,22 +193,25 @@ fn cmake_args(opencv_src: &Path, contrib_src: &Path, prefix: &Path) -> Vec<Strin
         "-DWITH_OPENJPEG=OFF",
         "-DWITH_AVIF=OFF",
     ];
-    args.extend(fixed.iter().map(|s| s.to_string()));
+    let for_cuda: &[&str] = if cuda { &with_cuda } else { &without_cuda };
+    args.extend(common.iter().chain(for_cuda).chain(&rest).map(|s| s.to_string()));
 
-    match cuda_arch() {
-        Some(arch) => {
-            args.push(format!("-DCUDA_ARCH_BIN={arch}"));
-            args.push("-DCUDA_ARCH_PTX=".to_string());
+    if cuda {
+        match cuda_arch() {
+            Some(arch) => {
+                args.push(format!("-DCUDA_ARCH_BIN={arch}"));
+                args.push("-DCUDA_ARCH_PTX=".to_string());
+            }
+            None => println!(
+                "cargo::warning=can't tell the GPU's compute capability, generating CUDA code for every architecture (set OCRS_CUDA_ARCH to narrow it down)"
+            ),
         }
-        None => println!(
-            "cargo::warning=can't tell the GPU's compute capability, generating CUDA code for every architecture (set OCRS_CUDA_ARCH to narrow it down)"
-        ),
-    }
-    if let Some(ccbin) = env::var_os("NVCC_CCBIN").filter(|v| !v.is_empty()) {
-        args.push(format!(
-            "-DCMAKE_CUDA_HOST_COMPILER={}",
-            Path::new(&ccbin).display()
-        ));
+        if let Some(ccbin) = env::var_os("NVCC_CCBIN").filter(|v| !v.is_empty()) {
+            args.push(format!(
+                "-DCMAKE_CUDA_HOST_COMPILER={}",
+                Path::new(&ccbin).display()
+            ));
+        }
     }
     if let Ok(extra) = env::var("OCRS_OPENCV_CMAKE_ARGS") {
         args.extend(extra.split_whitespace().map(str::to_string));

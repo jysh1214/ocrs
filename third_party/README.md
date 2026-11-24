@@ -6,7 +6,7 @@
 | `opencv_contrib/` | OpenCV's extra modules (the CUDA ones live here), git submodule | branch `4.x` at `2f5266f` (2026-11-05) |
 | `opencv-rust/` | the [`opencv`](https://crates.io/crates/opencv) crate (Rust bindings), copied in and patched | 0.102.0 |
 | `opencv-rust.patch` | the changes made to `opencv-rust/` | |
-| `_build/`, `_install/` | OpenCV build tree and install prefix, generated, not in git | |
+| `_build/`, `_install/` | OpenCV build trees and install prefixes, generated, not in git: `opencv` for the build with CUDA, `opencv-cpu` for the one without | |
 
 The submodules are not on a release tag because the latest 4.x release, 4.14.0, does not compile against
 FFmpeg 9 (`AVCodec::pix_fmts` and `AVCodec::supported_framerates` are gone); the fix is on the `4.x` branch
@@ -15,7 +15,9 @@ only. Move both submodules to the 4.15.0 tag once it exists.
 ## How the build fits together
 
 `crates/opencv-vendored/build.rs` runs CMake on `opencv/` + `opencv_contrib/` and installs the result into
-`_install/opencv`. The modules to build and all CMake options are listed in that file.
+`_install/opencv`. The modules to build and all CMake options are listed in that file. Without the cargo
+feature `cuda` (`cargo build --no-default-features`) it builds `opencv/` alone, without CUDA, and installs
+that into `_install/opencv-cpu`; the two builds are independent of each other.
 
 The `opencv` crate generates its bindings from the installed headers, so OpenCV has to be built before that
 crate's build script runs. Cargo only orders build scripts along dependency edges, and the published crate has

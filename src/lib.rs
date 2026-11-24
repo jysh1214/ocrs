@@ -13,7 +13,9 @@ pub mod ocr;
 pub mod rectify;
 
 use anyhow::{Result, ensure};
-use opencv::core::{self, Mat, Size};
+#[cfg(feature = "cuda")]
+use opencv::core;
+use opencv::core::{Mat, Size};
 
 use consensus::Consensus;
 use dedupe::Dedupe;
@@ -30,10 +32,25 @@ pub enum Device {
     Cpu,
 }
 
+impl Default for Device {
+    /// The GPU where the program is built to use one: without the feature `cuda`, OpenCV is built without
+    /// CUDA and the CPU is all there is.
+    fn default() -> Self {
+        if cfg!(feature = "cuda") {
+            Device::Cuda
+        } else {
+            Device::Cpu
+        }
+    }
+}
+
 impl Device {
     /// Fails for [`Device::Cuda`] when OpenCV cannot use a GPU, rather than letting it fall back to the CPU.
     pub fn ensure_available(self) -> Result<()> {
         if self == Device::Cuda {
+            #[cfg(not(feature = "cuda"))]
+            anyhow::bail!("this build of ocrs is without CUDA, it runs with --device cpu only");
+            #[cfg(feature = "cuda")]
             ensure!(
                 core::get_cuda_enabled_device_count()? > 0,
                 "no CUDA device is available to OpenCV (use --device cpu to run without one)"

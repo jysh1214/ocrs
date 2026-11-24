@@ -1,9 +1,10 @@
 //! Warps the area between the markers into an upright page.
 
 use anyhow::Result;
-use opencv::core::{self, BORDER_CONSTANT, GpuMat, Mat, Point2f, Scalar, Size, Stream, Vector};
-use opencv::prelude::*;
-use opencv::{cudawarping, imgproc};
+#[cfg(feature = "cuda")]
+use opencv::core::GpuMat;
+use opencv::core::{self, Mat, Point2f, Scalar, Size, Vector};
+use opencv::imgproc;
 
 use crate::Device;
 use crate::markers::Quad;
@@ -20,16 +21,25 @@ pub fn natural_size(quad: &Quad) -> Size {
 pub struct Rectifier {
     size: Size,
     /// Frame and page on the GPU, kept between frames so their memory is reused
+    #[cfg(feature = "cuda")]
     gpu: Option<(GpuMat, GpuMat)>,
 }
 
 impl Rectifier {
+    #[cfg(feature = "cuda")]
     pub fn new(device: Device, size: Size) -> Result<Self> {
         let gpu = match device {
             Device::Cuda => Some((GpuMat::new_def()?, GpuMat::new_def()?)),
             Device::Cpu => None,
         };
         Ok(Self { size, gpu })
+    }
+
+    /// A build without CUDA has no warp on the GPU, and OpenCV no types for one.
+    #[cfg(not(feature = "cuda"))]
+    pub fn new(device: Device, size: Size) -> Result<Self> {
+        anyhow::ensure!(device == Device::Cpu, "this build of ocrs is without CUDA");
+        Ok(Self { size })
     }
 
     /// Fills `page` with the part of `frame` inside `quad`, stretched to the page size.
@@ -43,37 +53,41 @@ impl Rectifier {
         )?;
         // anything the frame doesn't cover is paper
         let white = Scalar::all(255.0);
-        match &mut self.gpu {
-            Some((gpu_frame, gpu_page)) => {
-                gpu_frame.upload(frame)?;
-                cudawarping::warp_perspective(
-                    gpu_frame,
-                    gpu_page,
-                    &transform,
-                    self.size,
-                    imgproc::INTER_LINEAR,
-                    BORDER_CONSTANT,
-                    white,
-                    &mut Stream::null()?,
-                )?;
-                gpu_page.download(page)?;
-            }
-            None => imgproc::warp_perspective(
-                frame,
-                page,
+        #[cfg(feature = "cuda")]
+        if let Some((gpu_frame, gpu_page)) = &mut self.gpu {
+            use opencv::prelude::*;
+            // the frame goes up, the page comes down
+            gpu_frame.upload(frame)?;
+            opencv::cudawarping::warp_perspective(
+                gpu_frame,
+                gpu_page,
                 &transform,
                 self.size,
                 imgproc::INTER_LINEAR,
                 core::BORDER_CONSTANT,
                 white,
-            )?,
+                &mut core::Stream::null()?,
+            )?;
+            gpu_page.download(page)?;
+            return Ok(());
         }
+        imgproc::warp_perspective(
+            frame,
+            page,
+            &transform,
+            self.size,
+            imgproc::INTER_LINEAR,
+            core::BORDER_CONSTANT,
+            white,
+        )?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use opencv::prelude::*;
+
     use super::*;
 
     #[test]

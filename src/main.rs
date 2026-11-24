@@ -31,7 +31,7 @@ struct Cli {
     output: PathBuf,
 
     /// Where to run the image warping and the neural networks
-    #[arg(long, value_enum, default_value_t = Device::Cuda)]
+    #[arg(long, value_enum, default_value_t = Device::default())]
     device: Device,
 
     /// Frame size to ask a camera for [default: what the camera gives by itself, usually 640x480]

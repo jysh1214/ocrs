@@ -3,7 +3,12 @@ name = "opencv-vendored"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Builds the OpenCV checkout in third_party/ with CUDA and tells dependants where it is"
+description = "Builds the OpenCV checkout in third_party/, with CUDA or without, and tells dependants where it is"
 # `links` is what lets build.rs hand the install location to dependants as DEP_OPENCV_VENDORED_*
 links = "opencv_vendored"
 build = "build.rs"
+
+[features]
+# Build OpenCV with CUDA, its CUDA modules from third_party/opencv_contrib included. Without this feature
+# the build is a separate one that needs no CUDA toolkit, no cuDNN and no opencv_contrib.
+cuda = []

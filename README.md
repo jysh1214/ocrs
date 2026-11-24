@@ -20,7 +20,7 @@ CUDA modules from `third_party/opencv_contrib`) and builds the Rust bindings aga
 
 Needed on the machine:
 
-- CUDA toolkit and cuDNN (Arch: `cuda`, `cudnn`)
+- CUDA toolkit and cuDNN (Arch: `cuda`, `cudnn`), unless CUDA is left out, see [below](#without-cuda)
 - FFmpeg development files, for reading video files
 - `cmake` on `PATH`, and `ninja` if available
 - `clang` on `PATH` plus its libclang, for generating the bindings
@@ -37,13 +37,34 @@ The first build compiles OpenCV, which takes several minutes; its log is
 The build does not notice a system update that replaces CUDA, cuDNN or FFmpeg. If `ocrs` stops starting after
 one (`error while loading shared libraries: libavformat.so...`), delete those two directories and build again.
 
+### Without CUDA
+
+`ocrs-show` has no use for a GPU, and `ocrs` does without one when run with `--device cpu`. For a machine
+without the CUDA toolkit, such as one that only shows the text, there is a second way to build both:
+
+```sh
+git submodule update --init --depth 1 third_party/opencv
+cargo build --release --no-default-features
+```
+
+This compiles `third_party/opencv` without CUDA, into directories of its own
+(`third_party/_build/opencv-cpu` and `_install/opencv-cpu`) that the build with CUDA neither uses nor
+disturbs. It takes no CUDA toolkit, no cuDNN and no `third_party/opencv_contrib`; cmake, clang and the FFmpeg
+development files are needed as before. In the programs built this way `--device` is `cpu` unless told
+otherwise, and `cuda` is turned down.
+
+Either build puts its programs into `target/release`. To keep both on one machine, give one of them a place
+of its own, for instance `--target-dir target/cpu`.
+
+### Environment variables
+
 Environment variables read by the OpenCV build:
 
 | Variable | Meaning |
 | --- | --- |
 | `CMAKE` | cmake executable, default `cmake` |
-| `OCRS_CUDA_ARCH` | compute capabilities to generate CUDA code for, e.g. `8.9`; default: what `nvidia-smi` reports |
-| `NVCC_CCBIN` | host C++ compiler for nvcc, when CUDA doesn't support the default one yet |
+| `OCRS_CUDA_ARCH` | with CUDA: compute capabilities to generate code for, e.g. `8.9`; default: what `nvidia-smi` reports |
+| `NVCC_CCBIN` | with CUDA: host C++ compiler for nvcc, when CUDA doesn't support the default one yet |
 | `CMAKE_PREFIX_PATH` | extra prefixes to search, e.g. a cuDNN outside the system directories |
 | `OCRS_OPENCV_CMAKE_ARGS` | extra arguments for OpenCV's CMake configuration |
 
@@ -60,7 +81,7 @@ ocrs 'scan_%04d.png' -o scans.txt --device cpu                # image sequence, 
 | --- | --- | --- |
 | `--dict` | `4x4_50` | marker dictionary, any of OpenCV's predefined ones (`6x6_250`, `apriltag_36h11`, ...) |
 | `--ids` | `0,1,2,3` | ids of the markers at the top-left, top-right, bottom-right, bottom-left corner |
-| `--device` | `cuda` | `cpu` runs everything without a GPU (slow, meant for testing) |
+| `--device` | `cuda` | `cpu` runs everything without a GPU (slow, meant for testing); the default in a build without CUDA |
 | `--camera-size` | the camera's own | frame size to ask a camera for, `WIDTHxHEIGHT`; see below |
 | `--preview` | off | show what the camera sees on the terminal, with the markers that are found; see below |
 | `--page-size` | from the first frame | size in pixels the text area is rectified to, `WIDTHxHEIGHT` |

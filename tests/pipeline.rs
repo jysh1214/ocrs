@@ -194,6 +194,7 @@ fn page_without_text_is_not_content() -> Result<()> {
 
 /// The same frames through the CUDA code paths (GPU warp, networks on the CUDA backend).
 #[test]
+#[cfg(feature = "cuda")]
 #[ignore = "needs a CUDA GPU, run with `cargo test -- --ignored`"]
 fn cuda_reads_the_same_text_as_the_cpu() -> Result<()> {
     let pages = [
