@@ -775,6 +775,62 @@ mod tests {
     }
 
     #[test]
+    fn pages_that_go_missing_are_counted() -> Result<()> {
+        use ocrs::Missed;
+        let settings = settings();
+        let ready = frame(&settings, Signal::Ready, &["Enter starts."])?;
+        let done = frame(&settings, Signal::Done, &["End."])?;
+        let page = |number: usize| frame(&settings, Signal::Page(number), &PAGE);
+        let blank = |number: usize| frame(&settings, Signal::Page(number), &[]);
+
+        let mut pipeline = pipeline(2)?;
+        let mut missed = Vec::new();
+        let mut see = |frame: &Mat| -> Result<Outcome> {
+            let outcome = pipeline.process(frame)?;
+            missed.push((pipeline.missed().unseen, pipeline.missed().unread));
+            Ok(outcome)
+        };
+        see(&ready)?;
+        // the first page is 0: starting with 2 leaves two out
+        assert_eq!(see(&page(2)?)?, Outcome::Unsettled);
+        assert_eq!(see(&page(2)?)?, Outcome::Text(PAGE_TEXT.to_owned()));
+        // a page of which nothing can be read, which takes two frames to be sure of as well
+        assert_eq!(see(&blank(3)?)?, Outcome::Unsettled);
+        assert_eq!(see(&blank(3)?)?, Outcome::NoText);
+        // from 3 to 5 is one left out, and the page before was not read
+        assert_eq!(see(&page(5)?)?, Outcome::Unsettled);
+        // from 5 over 15 to 0 are ten left out; one frame of page 5 was read, so it is guessed, not missed
+        assert_eq!(see(&page(0)?)?, Outcome::Guess(PAGE_TEXT.to_owned()));
+        assert_eq!(see(&page(0)?)?, Outcome::Unsettled);
+        assert_eq!(see(&page(0)?)?, Outcome::Text(PAGE_TEXT.to_owned()));
+        assert_eq!(see(&done)?, Outcome::Done);
+        assert_eq!(
+            missed,
+            [
+                (0, 0),
+                (2, 0),
+                (2, 0),
+                (2, 0),
+                (2, 0),
+                (3, 1),
+                (13, 1),
+                (13, 1),
+                (13, 1),
+                (13, 1)
+            ]
+        );
+        assert_eq!(pipeline.finish(), None);
+        assert_eq!(
+            pipeline.missed(),
+            Missed {
+                unseen: 13,
+                unread: 1
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn page_on_show_to_the_end_is_guessed_when_the_frames_run_out() -> Result<()> {
         let settings = settings();
         let first = frame(&settings, Signal::Page(4), &PAGE)?;

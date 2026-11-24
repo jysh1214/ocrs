@@ -14,7 +14,7 @@ use opencv::{imgcodecs, videoio};
 
 use ocrs::markers;
 use ocrs::ocr::Models;
-use ocrs::{Device, Options, Outcome, Pipeline};
+use ocrs::{Device, Missed, Options, Outcome, Pipeline};
 
 use preview::Preview;
 
@@ -151,9 +151,16 @@ fn main() -> Result<()> {
     let mut frame = Mat::default();
     while capture.read(&mut frame)? && !frame.empty() {
         frames += 1;
+        let missed_before = pipeline.missed();
         let outcome = pipeline
             .process(&frame)
             .with_context(|| format!("frame {frames}"))?;
+        say_missed(
+            &mut log,
+            &format!("frame {frames}: "),
+            missed_before,
+            pipeline.missed(),
+        );
         let was_waiting = waiting;
         if outcome != Outcome::NoMarkers {
             located += 1;
@@ -219,6 +226,7 @@ fn main() -> Result<()> {
             break;
         }
     }
+    let missed_before = pipeline.missed();
     if let Some(text) = pipeline.finish() {
         recorder.record(&text, frames, pipeline.last_page())?;
         log.say(format!(
@@ -226,12 +234,22 @@ fn main() -> Result<()> {
             text.lines().count()
         ));
     }
+    say_missed(&mut log, "", missed_before, pipeline.missed());
 
     log.say(format!(
         "{frames} frames read, {located} with all four markers, {} recorded in {}",
         recorder.recorded,
         cli.output.display()
     ));
+    let missed = pipeline.missed();
+    if missed != Missed::default() {
+        log.say(format!(
+            "NOT RECORDED: {} of the pages that ocrs-show had on show ({} unseen, {} seen but not read)",
+            missed.unseen + missed.unread,
+            missed.unseen,
+            missed.unread
+        ));
+    }
     if frames > 0 && located == 0 {
         log.say("no frame showed all four markers, check --dict and --ids against the markers in use");
     } else if recorder.recorded == 0 && unsettled > 0 {
@@ -246,6 +264,29 @@ fn main() -> Result<()> {
         bail!("no frame could be read from {}", cli.input);
     }
     Ok(())
+}
+
+/// Says which pages of `ocrs-show` went missing between two states of the count.
+fn say_missed(log: &mut Log, prefix: &str, before: Missed, now: Missed) {
+    let pages = |count: u64| {
+        if count == 1 {
+            "1 page".to_owned()
+        } else {
+            format!("{count} pages")
+        }
+    };
+    if now.unseen > before.unseen {
+        log.say(format!(
+            "{prefix}{} went by unseen, going by the page numbers (or the pages were turned back)",
+            pages(now.unseen - before.unseen)
+        ));
+    }
+    if now.unread > before.unread {
+        log.say(format!(
+            "{prefix}{} went by without a frame that could be read",
+            pages(now.unread - before.unread)
+        ));
+    }
 }
 
 /// Where the remarks about the run go: to stderr, at once or, while the preview has the terminal, when it

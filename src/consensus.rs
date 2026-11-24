@@ -47,14 +47,14 @@ impl Consensus {
         }
         self.recent.push_back(text);
         self.alike.push_back(Vec::new());
-        let (reading, agreeing) = self.leading()?;
+        let (reading, agreeing) = self.leading(|_| true)?;
         (agreeing >= self.needed).then_some(reading)
     }
 
-    /// The reading that the most of the recent frames agree with, whether or not those are enough for it
-    /// to count. `None` if there has been no frame.
+    /// The reading with text that the most of the recent frames agree with, whether or not those are enough
+    /// for it to count. `None` if no frame read any text.
     pub fn likeliest(&self) -> Option<&str> {
-        Some(self.leading()?.0)
+        Some(self.leading(|reading| !reading.is_empty())?.0)
     }
 
     /// Forgets the frames so far, for when what comes next is known to be something else.
@@ -63,9 +63,9 @@ impl Consensus {
         self.alike.clear();
     }
 
-    /// The reading with the most support among the recent ones, and how many of them agree with it, itself
-    /// included.
-    fn leading(&self) -> Option<(&str, usize)> {
+    /// Of the recent readings that are `eligible`, the one with the most support, and how many of the
+    /// recent readings agree with it, itself included.
+    fn leading(&self, eligible: impl Fn(&str) -> bool) -> Option<(&str, usize)> {
         // for every reading: how many agree with it, and how similar those are in sum
         let mut support = vec![(1, 0.0); self.recent.len()];
         for (index, alike) in self.alike.iter().enumerate() {
@@ -82,6 +82,7 @@ impl Consensus {
         let (best, &(agreeing, _)) = support
             .iter()
             .enumerate()
+            .filter(|(reading, _)| eligible(&self.recent[*reading]))
             .max_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))?;
         Some((self.recent[best].as_str(), agreeing))
     }
@@ -205,6 +206,16 @@ mod tests {
         consensus.clear();
         assert_eq!(consensus.likeliest(), None);
         assert_eq!(consensus.push("next page".to_owned()), None);
+
+        // frames that read nothing are no reading of the page, however many they are
+        let mut consensus = Consensus::new(3, 0.9);
+        for reading in ["", "", "one frame read this", ""] {
+            consensus.push(reading.to_owned());
+        }
+        assert_eq!(consensus.likeliest(), Some("one frame read this"));
+        consensus.clear();
+        consensus.push(String::new());
+        assert_eq!(consensus.likeliest(), None);
     }
 
     #[test]

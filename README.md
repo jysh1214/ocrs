@@ -140,6 +140,11 @@ of its frames agree, and does not read the rest of them; a page that goes away b
 its likeliest reading and a remark. It follows that `ocrs` does not need to be told how long a page stays;
 the interval only has to be long enough for `--stable` frames of the camera.
 
+The page numbers also show when the text has holes: `ocrs` says so when a number is left out, which is a
+page that no frame showed with all its markers, and when a page went by without a frame that could be
+read, and it ends with the count of both (`NOT RECORDED: 2 of the pages ...`). A camera that is held by hand
+loses pages that way; one that stands still does not.
+
 `tests/sample.txt` is a text for this: some 1,900 words of prose with tables, figures, every printable ASCII
 character and the characters that are easily taken for one another.
 
