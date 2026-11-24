@@ -27,7 +27,7 @@ impl Rgb {
     }
 
     /// The colour that lies `share` (0 to 1) of the way from this one to `other`.
-    fn towards(self, other: Rgb, share: f32) -> Rgb {
+    pub fn towards(self, other: Rgb, share: f32) -> Rgb {
         let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * share).round() as u8;
         Rgb(mix(self.0, other.0), mix(self.1, other.1), mix(self.2, other.2))
     }

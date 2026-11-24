@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ocrs-show: __TITLE__</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  /* what is not chart is dark, so that the chart shows where it ends */
+  body { display: grid; place-items: center; overflow: hidden; background: #202020; }
+  body.idle { cursor: none; }
+  /* lengths inside the chart are in cqw, hundredths of its width */
+  #chart {
+    position: relative;
+    container-type: inline-size;
+    overflow: hidden;
+    background: var(--paper);
+    color: var(--ink);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #chart > * { position: absolute; }
+  /* markers have edges, not gradients */
+  svg { fill: var(--ink); shape-rendering: crispEdges; }
+  #panel { background: var(--ink); }
+  /* every character as it is and where it is: no ligatures, no kerning */
+  #text {
+    white-space: pre;
+    font-kerning: none;
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "clig" 0, "calt" 0;
+  }
+  #notes {
+    color: var(--faint);
+    font-family: system-ui, sans-serif;
+    text-align: center;
+    white-space: pre;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script>
+"use strict";
+// Written by ocrs-show: where everything goes, in hundredths of the chart's width, and what there is to show.
+const show = __SHOW__;
+
+const KEYS = "enter/space/n next   p previous   g/G first/last page   f full screen   h hide these notes";
+const SVG = "http://www.w3.org/2000/svg";
+const chart = document.getElementById("chart");
+const unit = length => `${length}cqw`;
+
+function add(tag, id) {
+  const element = document.createElement(tag);
+  element.id = id;
+  chart.append(element);
+  return element;
+}
+
+function place(element, { left, top, width, height }) {
+  Object.assign(element.style, { left: unit(left), top: unit(top), width: unit(width), height: unit(height) });
+}
+
+// A marker with its top-left corner there; returns the path that takes its modules.
+function marker({ left, top }) {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("viewBox", `0 0 ${show.side} ${show.side}`);
+  const path = document.createElementNS(SVG, "path");
+  svg.append(path);
+  chart.append(svg);
+  place(svg, { left, top, width: show.marker, height: show.marker });
+  return path;
+}
+
+// as large as the window allows in the chart's shape
+chart.style.width = `min(100vw, ${10000 / show.height}vh)`;
+chart.style.height = `min(100vh, ${show.height}vw)`;
+for (const colour of ["ink", "paper", "faint"]) chart.style.setProperty(`--${colour}`, show[colour]);
+
+for (const corner of show.corners) marker(corner).setAttribute("d", corner.path);
+const signal = marker(show.signal);
+
+if (show.panel) place(add("div", "panel"), show.panel);
+
+const [cellWidth, cellHeight] = show.text.cell;
+const text = add("div", "text");
+Object.assign(text.style, {
+  left: unit(show.text.left),
+  top: unit(show.text.top),
+  fontFamily: show.font,
+  fontWeight: show.bold ? "bold" : "normal",
+  color: show.panel ? "var(--paper)" : "var(--ink)",
+  // a character is as wide as the layout has it; --advance is its width in font sizes
+  fontSize: `calc(${unit(cellWidth)} / var(--advance))`,
+});
+
+// How wide the font's characters are for its size: 0.6 in most fonts with characters of one width.
+function measure() {
+  const probe = document.createElement("span");
+  probe.textContent = "0".repeat(64);
+  probe.style.cssText = "position: absolute; visibility: hidden; font-size: 100px;";
+  text.append(probe);
+  const advance = probe.getBoundingClientRect().width / 6400;
+  probe.remove();
+  chart.style.setProperty("--advance", advance > 0 ? advance : 0.6);
+}
+measure();
+// a font that is still on its way is measured when it is there
+if (document.fonts) document.fonts.ready.then(measure);
+
+const notes = show.notes ? add("div", "notes") : null;
+if (notes) {
+  place(notes, show.notes);
+  notes.style.lineHeight = unit(show.notes.height / 2);
+  notes.style.fontSize = unit(show.notes.height / 2 / 1.4);
+  notes.hidden = !show.showNotes;
+}
+
+function rows(lines, style) {
+  return lines.map(line => {
+    const row = document.createElement("div");
+    row.textContent = line;
+    Object.assign(row.style, style);
+    return row;
+  });
+}
+
+// What is on show: 0 is the start screen, 1 the first page, and one past the last page is the end screen.
+const pages = show.pages.length;
+const count = pages === 1 ? "1 page" : `${pages} pages`;
+let shown = 0;
+let turn = null;
+
+function draw() {
+  const number = shown - 1;
+  const [lines, path, stage] =
+    shown === 0 ? [show.start, show.signals.ready, `start, ${count} to come`]
+    : shown > pages ? [show.end, show.signals.done, `end, ${count} shown`]
+    : [show.pages[number], show.signals.pages[number % show.signals.pages.length], `page ${shown}/${pages}`];
+  signal.setAttribute("d", path);
+  text.replaceChildren(...rows(lines, {
+    height: unit(cellHeight * show.text.step),
+    lineHeight: unit(cellHeight),
+  }));
+  if (notes) notes.replaceChildren(...rows([`${stage} | ${show.facts}`, KEYS], {}));
+  // a page that is loaded again comes back to where it was
+  try {
+    history.replaceState(null, "", shown === 0 ? "#start" : shown > pages ? "#end" : `#${shown}`);
+  } catch {}
+}
+
+function go(to) {
+  clearTimeout(turn);
+  shown = Math.max(0, Math.min(to, pages + 1));
+  draw();
+  // the pages turn by themselves, the start screen and the end screen wait for a key; a page turned by
+  // hand stays for a whole interval too
+  if (show.interval && shown >= 1 && shown <= pages) {
+    turn = setTimeout(() => go(shown + 1), show.interval * 1000);
+  }
+}
+
+function named() {
+  const name = location.hash.slice(1);
+  if (name === "end") return pages + 1;
+  return /^\d+$/.test(name) && +name >= 1 && +name <= pages ? +name : 0;
+}
+
+const forward = () => go(shown + 1);
+// nothing comes before the start screen, and from the end screen it goes back to the last page
+const back = () => { if (shown > 0 && pages > 0) go(Math.max(1, shown - 1)); };
+const first = () => { if (pages > 0) go(1); };
+const last = () => { if (pages > 0) go(pages); };
+const toggleNotes = () => { if (notes) notes.hidden = !notes.hidden; };
+const fullScreen = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+};
+
+const keys = new Map([
+  ["Enter", forward], [" ", forward], ["n", forward], ["ArrowRight", forward], ["ArrowDown", forward],
+  ["PageDown", forward],
+  ["p", back], ["ArrowLeft", back], ["ArrowUp", back], ["PageUp", back], ["Backspace", back],
+  ["g", first], ["Home", first], ["G", last], ["End", last],
+  ["h", toggleNotes], ["?", toggleNotes], ["f", fullScreen],
+]);
+addEventListener("keydown", event => {
+  // the browser's own keys stay the browser's
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const action = keys.get(event.key);
+  if (action) {
+    event.preventDefault();
+    action();
+  }
+});
+addEventListener("hashchange", () => go(named()));
+
+// a mouse pointer that rests on the chart is in the way of the camera
+let resting = null;
+addEventListener("mousemove", () => {
+  document.body.classList.remove("idle");
+  clearTimeout(resting);
+  resting = setTimeout(() => document.body.classList.add("idle"), 2000);
+});
+
+go(named());
+</script>
+</body>
+</html>

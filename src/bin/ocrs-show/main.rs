@@ -1,14 +1,15 @@
-//! `ocrs-show` puts a text file between four markers on the terminal, as something to point a camera at
-//! and have `ocrs` read back.
+//! `ocrs-show` puts a text file between four markers, on the terminal or on a web page, as something to
+//! point a camera at and have `ocrs` read back.
 
 mod chart;
 mod terminal;
 mod text;
+mod web;
 
 use std::borrow::Cow;
 use std::fs;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -26,6 +27,12 @@ const MODULE: RangeInclusive<usize> = 1..=16;
 const MARGIN: RangeInclusive<usize> = 0..=8;
 const PAD: RangeInclusive<usize> = 0..=16;
 const LINE_SPACING: RangeInclusive<usize> = 0..=8;
+const COLUMNS: RangeInclusive<usize> = 8..=400;
+const LINE_HEIGHT: RangeInclusive<f64> = 1.5..=6.0;
+const MARKER: RangeInclusive<f64> = 1.0..=25.0;
+
+/// The fonts with characters of one width that the systems bring along.
+const DEFAULT_FONT: &str = "ui-monospace, Menlo, Consolas, \"DejaVu Sans Mono\", monospace";
 
 const DEFAULT_DICTIONARY: &str = "4x4_50";
 const DEFAULT_IDS: [i32; 4] = [0, 1, 2, 3];
@@ -45,7 +52,10 @@ Keys:
   h                               hide or show the notes below the text
   q, esc                          quit, and print the options for the layout as it was then
 
-The text has the size of the terminal's font: change that in the terminal and the layout follows.";
+The text has the size of the terminal's font: change that in the terminal and the layout follows, the
+markers with it. On a web page (--html) the markers have a size of their own, and the text the size that
+gets --columns characters into a line; there the keys turn the pages, h hides the notes and f fills the
+screen.";
 
 /// Shows a text file between four ArUco / AprilTag markers on the terminal, as a target to point a camera
 /// at: `ocrs` reads the text between the markers back. It starts on a start screen and ends on an end
@@ -64,11 +74,17 @@ struct Cli {
     #[arg(long, value_parser = markers::parse_ids, default_value = "0,1,2,3", value_name = "TL,TR,BR,BL")]
     ids: [i32; 4],
 
-    /// Size of a marker module: this many columns wide and half as many rows high
-    #[arg(long, default_value_t = 2, value_parser = within(MODULE), value_name = "COLUMNS")]
+    /// Terminal: size of a marker module, this many columns wide and half as many rows high
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = within(MODULE),
+        value_name = "COLUMNS",
+        conflicts_with = "html"
+    )]
     module: usize,
 
-    /// Blank space between the edges of the terminal and the markers, in modules
+    /// Blank space between the edges of the chart and the markers, in modules
     #[arg(long, default_value_t = 1, value_parser = within(MARGIN), value_name = "MODULES")]
     margin: usize,
 
@@ -107,10 +123,96 @@ struct Cli {
     /// Start without the notes below the text area: the keys and the measurements
     #[arg(long)]
     no_notes: bool,
+
+    /// Write the chart as a web page to this file instead of drawing it on the terminal: something to
+    /// open in a browser, where the markers stay as they are whatever the size of the text
+    #[arg(long, value_name = "FILE")]
+    html: Option<PathBuf>,
+
+    /// Web page: shape of the chart, best that of the camera's frames; 16:9 or 1920x1080 for a wide one
+    #[arg(long, default_value = "4:3", value_parser = parse_aspect, value_name = "W:H", requires = "html")]
+    aspect: (f64, f64),
+
+    /// Web page: characters in a line of text; the fewer, the larger the text
+    #[arg(
+        long,
+        default_value_t = 80,
+        value_parser = within(COLUMNS),
+        value_name = "CHARACTERS",
+        requires = "html"
+    )]
+    columns: usize,
+
+    /// Web page: height of a line of text in widths of a character; a terminal has about 2
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        value_parser = number_within(LINE_HEIGHT),
+        value_name = "WIDTHS",
+        requires = "html"
+    )]
+    line_height: f64,
+
+    /// Web page: side of a marker in percent of the width of the chart
+    #[arg(
+        long,
+        default_value_t = 5.0,
+        value_parser = number_within(MARKER),
+        value_name = "PERCENT",
+        requires = "html"
+    )]
+    marker: f64,
+
+    /// Web page: font of the text as CSS names it, such as "Courier New" or "JetBrains Mono, monospace"
+    #[arg(long, default_value = DEFAULT_FONT, value_name = "CSS", requires = "html")]
+    font: String,
+}
+
+impl Cli {
+    /// What a web page is to look like.
+    fn format(&self) -> web::Format {
+        web::Format {
+            aspect: self.aspect,
+            columns: self.columns,
+            line_height: self.line_height,
+            marker: self.marker,
+            font: self.font.clone(),
+        }
+    }
 }
 
 fn within(range: RangeInclusive<usize>) -> RangedU64ValueParser<usize> {
     RangedU64ValueParser::new().range(*range.start() as u64..=*range.end() as u64)
+}
+
+/// Takes a number in `range`.
+fn number_within(range: RangeInclusive<f64>) -> impl Fn(&str) -> Result<f64, String> + Clone {
+    move |text| match text.parse::<f64>() {
+        Ok(number) if range.contains(&number) => Ok(number),
+        _ => Err(format!(
+            "expected a number from {} to {}",
+            range.start(),
+            range.end()
+        )),
+    }
+}
+
+/// The shape of a chart as width and height, `4:3` or as a camera names its frames, `1280x960`.
+fn parse_aspect(text: &str) -> Result<(f64, f64), String> {
+    let wrong = || format!("expected a shape as WIDTH:HEIGHT such as 4:3 or 16:9, got {text:?}");
+    let (width, height) = text.split_once([':', 'x', 'X']).ok_or_else(wrong)?;
+    let side = |side: &str| {
+        side.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|side| side.is_finite() && *side > 0.0)
+    };
+    let (width, height) = side(width).zip(side(height)).ok_or_else(wrong)?;
+    if (0.25..=4.0).contains(&(width / height)) {
+        Ok((width, height))
+    } else {
+        Err(format!("a chart of {text} is too long and thin to show text on"))
+    }
 }
 
 /// What a key press calls for.
@@ -325,28 +427,16 @@ impl App {
             return Screen::notice(size.columns, size.rows, &self.settings, &lines);
         };
         let (signal, lines): (_, Cow<[Line]>) = match self.stage {
-            Stage::Ready => {
-                let pace = match self.interval {
-                    Some(seconds) => format!(", a new one every {seconds} s"),
-                    None => String::new(),
-                };
-                let message = format!(
-                    "Ready to show {}: {}{pace}.\n\nPoint the camera at this screen. ocrs says so when it has \
-                     it in view.\n\nEnter starts.",
-                    self.file.display(),
-                    self.page_count()
-                );
-                (&self.signals.ready, self.message(geometry, &message).into())
-            }
+            Stage::Ready => (
+                &self.signals.ready,
+                self.message(geometry, &self.start_message()).into(),
+            ),
             Stage::Pages => {
                 let page = self.pages.get(self.page).map_or(&[][..], Vec::as_slice);
                 (&self.signals.pages[self.page % PAGE_NUMBERS], page.into())
             }
             Stage::Done => {
-                let message = format!(
-                    "End of {}.\n\np goes back, g starts again, q quits.",
-                    self.file.display()
-                );
+                let message = self.end_message("p goes back, g starts again, q quits.");
                 (&self.signals.done, self.message(geometry, &message).into())
             }
         };
@@ -364,6 +454,30 @@ impl App {
             1 => "1 page".to_owned(),
             pages => format!("{pages} pages"),
         }
+    }
+
+    /// `, a new one every 2 s`, if the pages turn by themselves.
+    fn pace(&self) -> String {
+        match self.interval {
+            Some(seconds) => format!(", a new one every {seconds} s"),
+            None => String::new(),
+        }
+    }
+
+    /// What the start screen says.
+    fn start_message(&self) -> String {
+        format!(
+            "Ready to show {}: {}{}.\n\nPoint the camera at this screen. ocrs says so when it has it in \
+             view.\n\nEnter starts.",
+            self.file.display(),
+            self.page_count(),
+            self.pace()
+        )
+    }
+
+    /// What the end screen says, with the keys that lead on from it.
+    fn end_message(&self, keys: &str) -> String {
+        format!("End of {}.\n\n{keys}", self.file.display())
     }
 
     /// A message of the program's own, laid out like a page of the text.
@@ -405,6 +519,46 @@ impl App {
             .into_iter()
             .chain(keys.map(str::to_owned))
             .collect()
+    }
+
+    /// The show as a web page that is laid out as `format` has it.
+    fn web_show(&mut self, format: &web::Format) -> Result<web::Show> {
+        let settings = &self.settings;
+        let layout = web::Layout::new(self.markers[0].side(), format, settings)?;
+        let (columns, lines) = (layout.columns, layout.lines);
+        self.pages = text::paginate(&self.text, columns, lines, self.wrap);
+        // a message of the program's own is laid out like a page of the text
+        let message = |message: String| {
+            let pages = text::paginate(&message, columns, lines, Wrap::Word);
+            texts(pages.into_iter().next().unwrap_or_default())
+        };
+        let facts = format!(
+            "{columns}x{lines} characters | marker {}% | margin {} | pad {} | spacing {}",
+            short(format.marker),
+            settings.margin,
+            settings.pad,
+            settings.line_spacing
+        );
+        Ok(web::Show {
+            title: self.file.display().to_string(),
+            layout,
+            font: format.font.clone(),
+            bold: settings.bold,
+            ink: settings.ink,
+            paper: settings.paper,
+            markers: self.markers.clone(),
+            signals: web::Signals {
+                ready: self.signals.ready.clone(),
+                done: self.signals.done.clone(),
+                pages: self.signals.pages.clone(),
+            },
+            start: message(self.start_message()),
+            pages: self.pages.iter().cloned().map(texts).collect(),
+            end: message(self.end_message("p goes back, g starts again.")),
+            interval: self.interval,
+            notes: self.notes,
+            facts,
+        })
     }
 
     /// The command line that starts with the layout as it is now.
@@ -465,6 +619,41 @@ impl App {
         }
         parts.join(", ")
     }
+}
+
+/// The lines of a page as they are shown.
+fn texts(page: Page) -> Vec<String> {
+    page.into_iter().map(|line| line.text).collect()
+}
+
+/// Writes the show as a web page to `file` and says what is in it.
+fn write_page(app: &mut App, format: &web::Format, file: &Path) -> Result<()> {
+    let show = app.web_show(format)?;
+    fs::write(file, web::page(&show)).with_context(|| format!("can't write {}", file.display()))?;
+    println!("{}", page_summary(file, format, &show, &app.pace()));
+    Ok(())
+}
+
+/// What a page that was written holds and how large its text is, which is what a camera has to cope with.
+fn page_summary(file: &Path, format: &web::Format, show: &web::Show, pace: &str) -> String {
+    let layout = &show.layout;
+    let pages = match show.pages.len() {
+        1 => "1 page".to_owned(),
+        pages => format!("{pages} pages"),
+    };
+    let (across, down) = format.aspect;
+    let character = layout.cell.0 / web::WIDTH;
+    format!(
+        "wrote {}: {pages} of {}x{} characters{pace}\n\
+         chart {across}:{down}, marker {}% of its width, a character 1/{:.0}: {} px a column where the chart \
+         is 1000 px wide in a frame of the camera",
+        file.display(),
+        layout.columns,
+        layout.lines,
+        short(format.marker),
+        1.0 / character,
+        short(1000.0 * character)
+    )
 }
 
 /// Moves `value` one step up or down, as far as `range` goes.
@@ -541,7 +730,12 @@ fn run(app: &mut App, terminal: &mut Terminal) -> Result<Size> {
 }
 
 fn main() -> Result<()> {
-    let mut app = App::new(Cli::parse())?;
+    let cli = Cli::parse();
+    let page = cli.html.clone().map(|file| (file, cli.format()));
+    let mut app = App::new(cli)?;
+    if let Some((file, format)) = page {
+        return write_page(&mut app, &format, &file);
+    }
     let mut terminal = Terminal::open()?;
     let outcome = run(&mut app, &mut terminal);
     // back to the normal screen before anything is printed
@@ -559,8 +753,9 @@ mod tests {
 
     use super::*;
 
-    /// An app showing `text`, as started with `arguments`.
-    fn app(text: &str, arguments: &[&str]) -> App {
+    /// The command line `arguments` for a file with `text`, as the app it starts and as what it has to
+    /// say about a web page.
+    fn start(text: &str, arguments: &[&str]) -> (App, web::Format) {
         // tests run side by side, each needs a file of its own
         static FILES: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -573,9 +768,25 @@ mod tests {
             .unwrap();
         let mut command = vec!["ocrs-show", path.to_str().unwrap()];
         command.extend(arguments);
-        let app = App::new(Cli::try_parse_from(command).unwrap());
+        let cli = Cli::try_parse_from(command).unwrap();
+        let format = cli.format();
+        let app = App::new(cli);
         fs::remove_file(&path).unwrap();
-        app.unwrap()
+        (app.unwrap(), format)
+    }
+
+    /// An app showing `text`, as started with `arguments`.
+    fn app(text: &str, arguments: &[&str]) -> App {
+        start(text, arguments).0
+    }
+
+    /// The show that goes into the web page for `text` and `arguments`, and the name of the text.
+    fn web_show(text: &str, arguments: &[&str]) -> (web::Show, String, web::Format) {
+        let mut command = vec!["--html", "show.html"];
+        command.extend(arguments);
+        let (mut app, format) = start(text, &command);
+        let show = app.web_show(&format).unwrap();
+        (show, app.file.display().to_string(), format)
     }
 
     fn press(app: &mut App, key: char) -> Reaction {
@@ -874,6 +1085,173 @@ mod tests {
             app.measurements(&size),
             "terminal 80x24 cells, cell 9x19.5 px, marker 12x6 cells = 108x117 px, text 48x8 cells, 8 lines a page"
         );
+    }
+
+    #[test]
+    fn web_page_has_the_text_at_the_size_asked_for() {
+        let (show, file, format) = web_show(&numbered_lines(100), &["--columns", "40", "--interval", "1.5"]);
+        // markers of 5 % and their margins leave 63.33 of a chart 75 high, and 40 characters with their
+        // padding are 2.0 wide each and 4.0 high: 15 rows less two of padding
+        assert_eq!((show.layout.columns, show.layout.lines), (40, 13));
+        assert_eq!(show.pages.len(), 8);
+        assert_eq!(show.pages[0][0], "line 1");
+        assert_eq!(
+            show.pages[7],
+            [
+                "line 92", "line 93", "line 94", "line 95", "line 96", "line 97", "line 98", "line 99",
+                "line 100"
+            ]
+        );
+        assert_eq!(
+            (show.title.as_str(), show.interval, show.notes),
+            (file.as_str(), Some(1.5), true)
+        );
+        // the screens before and after are laid out like pages, in lines of 40 characters
+        assert!(show.start.iter().all(|line| line.len() <= 40), "{:?}", show.start);
+        let start = show.start.join(" ");
+        assert!(
+            start.contains("8 pages, a new one every 1.5 s.") && start.ends_with("Enter starts."),
+            "{start}"
+        );
+        let end = show.end.join(" ");
+        // there is no key that quits a web page
+        assert!(
+            end.starts_with("End of") && end.ends_with("p goes back, g starts again."),
+            "{end}"
+        );
+        assert_eq!(
+            show.facts,
+            "40x13 characters | marker 5% | margin 1 | pad 1 | spacing 0"
+        );
+        assert_eq!(show.signals.pages.len(), PAGE_NUMBERS);
+        assert_eq!(show.markers, app("", &[]).markers);
+
+        let summary = page_summary(Path::new("show.html"), &format, &show, ", a new one every 1.5 s");
+        assert_eq!(
+            summary,
+            "wrote show.html: 8 pages of 40x13 characters, a new one every 1.5 s\n\
+             chart 4:3, marker 5% of its width, a character 1/50: 20.1 px a column where the chart is 1000 px \
+             wide in a frame of the camera"
+        );
+    }
+
+    #[test]
+    fn web_page_follows_the_options_of_the_chart() {
+        let options = [
+            "--columns",
+            "60",
+            "--aspect",
+            "1920x1080",
+            "--marker",
+            "4.5",
+            "--line-height",
+            "1.8",
+            "--font",
+            "Courier New",
+            "--margin",
+            "2",
+            "--pad",
+            "0",
+            "--line-spacing",
+            "1",
+            "--invert",
+            "--bold",
+            "--paper",
+            "d0d0d0",
+            "--no-notes",
+            "--wrap",
+            "none",
+            "--dict",
+            "6x6_250",
+            "--ids",
+            "9,8,7,6",
+        ];
+        let (show, ..) = web_show(
+            "a line that is longer than sixty characters and so is cut off at its end\nsecond",
+            &options,
+        );
+        let layout = &show.layout;
+        // markers of 8 modules, two of which are the margin: the area begins 4.5 * 10 / 8 from the edges
+        assert!((layout.area.left - 5.625).abs() < 1e-9 && (layout.height - 56.25).abs() < 1e-9);
+        assert!((layout.cell.1 / layout.cell.0 - 1.8).abs() < 1e-9);
+        // the panel is 43.875 high and a line 87.625 / 60 * 1.8: 16 rows, of which every other one is empty
+        assert_eq!((layout.columns, layout.lines, layout.line_step), (60, 8, 2));
+        assert!(layout.panel.is_some());
+        assert_eq!(
+            (show.font.as_str(), show.bold, show.paper, show.notes),
+            ("Courier New", true, Rgb(208, 208, 208), false)
+        );
+        assert_eq!(
+            show.pages,
+            [[
+                "a line that is longer than sixty characters and so is cut of",
+                "second"
+            ]]
+        );
+        assert_eq!(show.markers[0], markers::pattern("6x6_250", 9).unwrap());
+        assert_eq!(show.markers[0].side(), 8);
+        assert_eq!(
+            show.facts,
+            "60x8 characters | marker 4.5% | margin 2 | pad 0 | spacing 1"
+        );
+
+        // a text without pages has a start and an end to show all the same
+        let (empty, ..) = web_show("\n\n", &[]);
+        assert!(empty.pages.is_empty());
+        assert!(empty.start.join(" ").contains("0 pages"));
+    }
+
+    #[test]
+    fn web_page_that_has_no_room_is_not_written() {
+        let (mut app, format) = start(
+            "text",
+            &["--html", "show.html", "--columns", "8", "--line-height", "6"],
+        );
+        let error = app.web_show(&format).unwrap_err().to_string();
+        assert!(error.contains("more --columns"), "{error}");
+    }
+
+    #[test]
+    fn options_of_the_web_page_are_checked() {
+        let parse = |arguments: &[&str]| {
+            let mut command = vec!["ocrs-show", "Cargo.toml"];
+            command.extend(arguments);
+            Cli::try_parse_from(command)
+        };
+        assert!(parse(&["--html", "show.html"]).is_ok());
+        assert_eq!(
+            parse(&["--html", "show.html", "--aspect", "16:9"])
+                .unwrap()
+                .aspect,
+            (16.0, 9.0)
+        );
+        assert_eq!(
+            parse(&["--html", "show.html", "--aspect", "1280x960"])
+                .unwrap()
+                .aspect,
+            (1280.0, 960.0)
+        );
+        for wrong in [
+            // what only a web page has is not for the terminal, and the other way round
+            &["--columns", "90"][..],
+            &["--aspect", "16:9"],
+            &["--marker", "4"],
+            &["--line-height", "2"],
+            &["--font", "monospace"],
+            &["--html", "show.html", "--module", "1"],
+            &["--html", "show.html", "--columns", "7"],
+            &["--html", "show.html", "--columns", "401"],
+            &["--html", "show.html", "--aspect", "4"],
+            &["--html", "show.html", "--aspect", "4:0"],
+            &["--html", "show.html", "--aspect", "9:1"],
+            &["--html", "show.html", "--aspect", "a:b"],
+            &["--html", "show.html", "--marker", "0.5"],
+            &["--html", "show.html", "--marker", "30"],
+            &["--html", "show.html", "--line-height", "1"],
+            &["--html", "show.html", "--line-height", "nan"],
+        ] {
+            assert!(parse(wrong).is_err(), "{wrong:?}");
+        }
     }
 
     #[test]

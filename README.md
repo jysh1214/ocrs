@@ -142,8 +142,9 @@ character now and then, so asking for equal texts with `--similarity 1` would re
 
 ## Test target: `ocrs-show`
 
-`ocrs-show` puts a text file between four markers on the terminal it runs in. With a camera pointed at that
-terminal the whole chain can be tried out: what `ocrs` writes should be the text that is on show.
+`ocrs-show` puts a text file between four markers, on the terminal it runs in or on a
+[web page](#as-a-web-page). With a camera pointed at that the whole chain can be tried out: what `ocrs` writes
+should be the text that is on show.
 
 ```sh
 ocrs-show tests/sample.txt --interval 2                 # in a terminal the camera sees
@@ -210,11 +211,57 @@ The markers need blank space around them to be found. The margin is that space t
 or screen bezel, the padding towards the text. Without padding the text touches the corners of the markers
 and the text area is located a pixel or two off.
 
+### As a web page
+
+On a terminal the markers are made of character cells. They cannot be smaller than 6 columns by 3 rows, and
+they grow with the text: the larger the font, the more of the screen goes to the markers. `--html` writes the
+chart as a web page instead, where the markers have a size of their own and the text has the size that gets
+`--columns` characters into a line:
+
+```sh
+ocrs-show tests/sample.txt --html show.html --interval 2 --columns 80
+```
+
+```
+wrote show.html: 8 pages of 80x28 characters, a new one every 2 s
+chart 4:3, marker 5% of its width, a character 1/95: 10.5 px a column where the chart is 1000 px wide in a frame of the camera
+```
+
+The page is one file that loads nothing else, so it can be copied to whatever has the screen, or fetched
+from there (`python -m http.server` in its directory). A browser shows the chart as large as its window
+allows, and `f` gives it the whole screen. It has the start screen, the end screen and the fifth marker of
+the chart on the terminal, so `ocrs` is run the same way, and the keys that turn the pages: `enter` or
+`space` forward, `p` back, `g` and `G` to the first and the last page, `h` for the notes.
+
+| Option | Default | |
+| --- | --- | --- |
+| `--html` | | file to write the page to |
+| `--aspect` | `4:3` | shape of the chart as `W:H` or `WxH`, best that of the camera's frames: `16:9` for 1920x1080 |
+| `--columns` | `80` | characters in a line of text; fewer make the text larger and the pages more |
+| `--line-height` | `2` | height of a line of text in widths of a character, which is about what a terminal has |
+| `--marker` | `5` | side of a marker in percent of the chart's width |
+| `--font` | the system's | font of the text as CSS names it, one with characters of equal width |
+
+`--margin`, `--pad`, `--line-spacing`, `--wrap`, `--invert`, `--bold`, `--ink`, `--paper`, `--interval`,
+`--no-notes`, `--dict` and `--ids` do what they do on the terminal; `--module` is for the terminal alone.
+The layout is settled when the page is written. For another one, write the page again and load it again in
+the browser, which comes back to the page it was on.
+
+A chart in the shape of the camera's frames can fill them, and what `ocrs-show` prints says what that comes
+to: the 80 characters above get 10.5 pixels each where the chart is 1000 pixels wide in a frame, and 12.6
+where it is 1200. `--pad 0` gives the text the space that the padding takes, about a tenth more.
+
+The markers are best left at 5 %. In frames blurred the way a webcam blurs them, a 4x4 marker is found
+reliably from some 45 pixels on, which is 5 % of a chart that fills 900 pixels of a frame; markers of 4 %
+get lost unless the chart fills nearly all of a frame of 1280, and markers of 3 % are not found at all.
+Dictionaries with more modules to a marker need larger markers.
+
 ## Tests
 
 `cargo test` runs on the CPU and does not touch the GPU: unit tests for the pure logic, `tests/pipeline.rs`
-which reads synthetic frames end to end, and the tests of `ocrs-show`, which have its screens found and
-read as images. The one test that sends frames through the CUDA code paths is ignored by default:
+which reads synthetic frames end to end, and the tests of `ocrs-show`, which have its screens and the layout
+of its web page found and read as images; what a browser makes of that page is not among them. The one test
+that sends frames through the CUDA code paths is ignored by default:
 
 ```sh
 cargo test -- --ignored
