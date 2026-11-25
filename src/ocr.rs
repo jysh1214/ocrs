@@ -24,15 +24,20 @@ pub struct Models {
     pub dictionary: String,
 }
 
-impl Default for Models {
-    /// The models that are compiled into the program, see `models/README.md`. Their recogniser reads Chinese
-    /// and Japanese next to the Latin script.
-    fn default() -> Self {
-        Self {
-            detector: include_bytes!("../models/PP-OCRv6_det_small.onnx").to_vec(),
-            recognizer: include_bytes!("../models/PP-OCRv6_rec_small.onnx").to_vec(),
-            dictionary: include_str!("../models/ppocrv6_dict.txt").to_owned(),
-        }
+impl Models {
+    /// The models that are compiled into the program, see `model/README.md`: those that were in `model/`
+    /// when it was built, and none if they were not there (`build.rs`). Their recogniser reads Chinese and
+    /// Japanese next to the Latin script.
+    pub fn built_in() -> Option<Self> {
+        #[cfg(built_in_models)]
+        let models = Some(Self {
+            detector: include_bytes!(env!("OCRS_DETECTOR")).to_vec(),
+            recognizer: include_bytes!(env!("OCRS_RECOGNIZER")).to_vec(),
+            dictionary: include_str!(env!("OCRS_DICTIONARY")).to_owned(),
+        });
+        #[cfg(not(built_in_models))]
+        let models = None;
+        models
     }
 }
 

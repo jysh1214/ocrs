@@ -2,3 +2,7 @@
 # OpenCV build tree and install prefix, produced by crates/opencv-vendored
 /third_party/_build
 /third_party/_install
+# the models, which tools/download_models.py fetches; what describes them is in git
+/model/*
+!/model/README.md
+!/model/LICENSE

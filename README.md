@@ -24,11 +24,18 @@ Needed on the machine:
 - FFmpeg development files, for reading video files
 - `cmake` on `PATH`, and `ninja` if available
 - `clang` on `PATH` plus its libclang, for generating the bindings
+- Python with `onnx` and `numpy`, for fetching the models
 
 ```sh
 git submodule update --init --depth 1
+python tools/download_models.py
 cargo build --release
 ```
+
+The models are not in the repository. `tools/download_models.py` fetches them into `model/`, some 31 MB, and
+the build compiles them into `ocrs`, see [model/README.md](model/README.md). A build without them succeeds
+with a warning: its `ocrs` has to be told its models with `--det-model`, `--rec-model` and `--rec-dict`, and
+its `ocrs-show` lacks nothing.
 
 The first build compiles OpenCV, which takes several minutes; its log is
 `third_party/_build/opencv/ocrs-build.log`. Later builds reuse `third_party/_build` and `third_party/_install`
@@ -51,7 +58,8 @@ This compiles `third_party/opencv` without CUDA, into directories of its own
 (`third_party/_build/opencv-cpu` and `_install/opencv-cpu`) that the build with CUDA neither uses nor
 disturbs. It takes no CUDA toolkit, no cuDNN and no `third_party/opencv_contrib`; cmake, clang and the FFmpeg
 development files are needed as before. In the programs built this way `--device` is `cpu` unless told
-otherwise, and `cuda` is turned down.
+otherwise, and `cuda` is turned down. A machine that only shows the text can do without the models and the
+Python that fetches them, too.
 
 Either build puts its programs into `target/release`. To keep both on one machine, give one of them a place
 of its own, for instance `--target-dir target/cpu`.
@@ -89,7 +97,7 @@ ocrs 'scan_%04d.png' -o scans.txt --device cpu                # image sequence, 
 | `--similarity` | `0.9` | how alike two texts must be to count as the same content |
 | `--separator` | none | a line to write between the texts of two frames |
 | `--dump-pages` | off | directory to save the rectified text area of every recorded frame to |
-| `--det-model`, `--rec-model`, `--rec-dict` | built in | other PP-OCR models, see [models/README.md](models/README.md) |
+| `--det-model`, `--rec-model`, `--rec-dict` | built in | other PP-OCR models, see [model/README.md](model/README.md) |
 
 ### Cameras
 

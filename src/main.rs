@@ -106,16 +106,35 @@ fn main() -> Result<()> {
         "--similarity must be between 0 and 1"
     );
 
-    let mut models = Models::default();
+    // the built-in models, each replaced by the one that is named
+    let (mut detector, mut recognizer) = match Models::built_in() {
+        Some(models) => (
+            Some(models.detector),
+            Some((models.recognizer, models.dictionary)),
+        ),
+        None => (None, None),
+    };
     let read = |path: &PathBuf| fs::read(path).with_context(|| format!("can't read {}", path.display()));
     if let Some(path) = &cli.det_model {
-        models.detector = read(path)?;
+        detector = Some(read(path)?);
     }
     if let (Some(model), Some(dictionary)) = (&cli.rec_model, &cli.rec_dict) {
-        models.recognizer = read(model)?;
-        models.dictionary = String::from_utf8(read(dictionary)?)
+        let dictionary = String::from_utf8(read(dictionary)?)
             .with_context(|| format!("{} is not UTF-8 text", dictionary.display()))?;
+        recognizer = Some((read(model)?, dictionary));
     }
+    let (Some(detector), Some((recognizer, dictionary))) = (detector, recognizer) else {
+        bail!(
+            "this ocrs has no models built in, as model/ did not hold them when it was built: run \
+             tools/download_models.py and build again, or name the models with --det-model, --rec-model and \
+             --rec-dict"
+        );
+    };
+    let models = Models {
+        detector,
+        recognizer,
+        dictionary,
+    };
     let stable_frames = cli.stable.unwrap_or(if is_picture(&cli.input) { 1 } else { 3 });
     let mut pipeline = Pipeline::new(Options {
         device: cli.device,

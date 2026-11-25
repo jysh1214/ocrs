@@ -92,7 +92,7 @@ fn pipeline_with(device: Device, stable_frames: usize, min_similarity: f64) -> R
         page_size: None,
         stable_frames,
         min_similarity,
-        models: Models::default(),
+        models: Models::built_in().expect("no models in model/: tools/download_models.py fetches them"),
     })
 }
 

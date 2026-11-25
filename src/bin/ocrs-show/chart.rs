@@ -708,7 +708,7 @@ mod tests {
             page_size: None,
             stable_frames,
             min_similarity: 0.9,
-            models: Models::default(),
+            models: Models::built_in().expect("no models in model/: tools/download_models.py fetches them"),
         })
     }
 
