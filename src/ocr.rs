@@ -25,12 +25,13 @@ pub struct Models {
 }
 
 impl Default for Models {
-    /// The English models that are compiled into the program, see `models/README.md`.
+    /// The models that are compiled into the program, see `models/README.md`. Their recogniser reads Chinese
+    /// and Japanese next to the Latin script.
     fn default() -> Self {
         Self {
-            detector: include_bytes!("../models/PP-OCRv5_det_mobile.onnx").to_vec(),
-            recognizer: include_bytes!("../models/en_PP-OCRv5_rec_mobile.onnx").to_vec(),
-            dictionary: include_str!("../models/ppocrv5_en_dict.txt").to_owned(),
+            detector: include_bytes!("../models/PP-OCRv6_det_small.onnx").to_vec(),
+            recognizer: include_bytes!("../models/PP-OCRv6_rec_small.onnx").to_vec(),
+            dictionary: include_str!("../models/ppocrv6_dict.txt").to_owned(),
         }
     }
 }

@@ -12,6 +12,10 @@ the image width again: `Reshape` targets get the placeholders 0 (copy this dimen
 (infer it), `Squeeze` / `Unsqueeze` become a `Transpose` plus a `Reshape` that only uses placeholders. The
 result declares a fixed input shape (N=1, W=320) and still accepts any batch size and width.
 
+It also turns every `ReduceMean` over the height and width of an image into the `GlobalAveragePool` that it
+is: OpenCV has a layer for the first on the CPU only, so on the CUDA backend each of them would send its
+input to the CPU and the result back.
+
 Needs only `onnx` and `numpy`:
 
     freeze_onnx_shapes.py in.onnx out.onnx [--height 48]
@@ -192,6 +196,31 @@ def replace_squeezes(model, shapes):
     drop_unused_initializers(graph)
 
 
+def pool_global_means(model, shapes):
+    """Turn `ReduceMean` over axes 2 and 3 of a rank 4 tensor, with the axes kept, into `GlobalAveragePool`."""
+    constants = {i.name: numpy_helper.to_array(i) for i in model.graph.initializer}
+    for node in model.graph.node:
+        if node.op_type != "ReduceMean" or node.input[0] not in shapes:
+            continue
+        attributes = {a.name: a for a in node.attribute}
+        # the axes are an attribute up to opset 17 and an input from opset 18 on
+        if "axes" in attributes:
+            axes = list(attributes["axes"].ints)
+        elif len(node.input) > 1 and node.input[1] in constants:
+            axes = constants[node.input[1]].tolist()
+        else:
+            continue
+        rank = len(shapes[node.input[0]])
+        keeps_axes = attributes["keepdims"].i != 0 if "keepdims" in attributes else True
+        if rank != 4 or sorted(a % rank for a in axes) != [2, 3] or not keeps_axes:
+            continue
+        node.op_type = "GlobalAveragePool"
+        del node.attribute[:]
+        del node.input[1:]
+        print(f"  {node.name}: ReduceMean over axes [2, 3] -> GlobalAveragePool")
+    drop_unused_initializers(model.graph)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("src")
@@ -208,6 +237,7 @@ def main():
     variants = [(model, known_shapes(model)) for model in variants]
     model = generalise_reshape_targets(variants)
     replace_squeezes(model, variants[0][1])
+    pool_global_means(model, variants[0][1])
     del model.graph.output[:]
     model.graph.output.extend(original.graph.output)  # same tensors, with their symbolic shapes
     # Annotate the intermediate tensors: OpenCV only recognises the layer normalisations (and then runs them

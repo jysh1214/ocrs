@@ -8,7 +8,7 @@ Per frame:
 
 1. find the four markers (`objdetect::ArucoDetector`) and take the area they enclose;
 2. warp that area into an upright page (`cuda::warpPerspective`);
-3. detect the text lines and read each of them (PP-OCRv5 models on OpenCV DNN's CUDA backend);
+3. detect the text lines and read each of them (PP-OCRv6 models on OpenCV DNN's CUDA backend);
 4. put the lines into reading order and wait until most of the recent frames read that text;
 5. if it differs from the text recorded before, append it to the output file and flush.
 
