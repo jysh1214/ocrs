@@ -169,6 +169,9 @@ loses pages that way; one that stands still does not.
 
 `tests/sample.txt` is a text for this: some 1,900 words of prose with tables, figures, every printable ASCII
 character and the characters that are easily taken for one another.
+`tests/code.txt` is one of code: some 260 lines of C++ that compile (`g++ -std=c++20 -x c++ tests/code.txt`),
+none wider than 62 columns, with the operators and brackets of the language, every printable ASCII character
+and names that differ by characters such as `l` and `1`.
 
 The markers are drawn with half block characters in the corners of the terminal, and the text goes into the
 area between them, one page at a time. The text has the size of the terminal's font: change it there (in

@@ -1,0 +1,266 @@
+// greyfell.cpp - reads the log of a weather station and
+// prints a summary of it. A text for trying ocrs on code.
+//
+// Build: g++ -std=c++20 -Wall -Wextra -x c++ code.txt
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#define STATION_ID 0x1A2B
+#define SQUARE(x) ((x) * (x))
+
+#if defined(NDEBUG) && !defined(TRACE)
+#  define LOG(msg) ((void)0)
+#else
+#  define LOG(msg) (std::cerr << "[log] " << msg << '\n')
+#endif
+
+namespace greyfell {
+
+constexpr double kZeroKelvin = -273.15;
+constexpr int kHoursPerDay = 24, kStep = 3;
+constexpr std::uint32_t kMask = 0xFFu << 8 | 0b1010'0101u;
+constexpr long kMaxRows = 1'000'000L;
+
+enum class Sky : std::uint8_t { Clear, Cloud, Fog, Snow };
+
+enum Flag : unsigned {
+    kNone = 0,
+    kLate = 1u << 0,
+    kEstimated = 1u << 1,
+    kFault = 1u << 2,
+};
+
+struct Reading {
+    int hour = 0;
+    double temp = 0.0;      // degrees C
+    double pressure = 0.0;  // hPa
+    float wind = 0.0f;      // m/s
+    Sky sky = Sky::Clear;
+    unsigned flags = kNone;
+
+    bool ok() const { return !(flags & kFault); }
+    double kelvin() const { return temp - kZeroKelvin; }
+    bool operator<(const Reading &other) const {
+        return hour < other.hour;
+    }
+};
+
+const char *name(Sky sky) {
+    switch (sky) {
+    case Sky::Clear: return "clear";
+    case Sky::Cloud: return "cloud";
+    case Sky::Fog:   return "fog";
+    case Sky::Snow:  return "snow";
+    }
+    return "?";
+}
+
+template <typename T>
+T clamp(T value, T low, T high) {
+    if (value < low) return low;
+    return value > high ? high : value;
+}
+
+template <typename It, typename Fn>
+auto mean(It first, It last, Fn &&get) -> double {
+    double sum = 0.0;
+    std::size_t n = 0;
+    for (; first != last; ++first, ++n) {
+        sum += get(*first);
+    }
+    return n == 0 ? 0.0 : sum / static_cast<double>(n);
+}
+
+// A checksum over the bytes of a line, 16 bits wide.
+std::uint16_t checksum(const char *text) noexcept {
+    std::uint32_t a = 1, b = 0;
+    for (const char *p = text; *p != '\0'; ++p) {
+        a = (a + static_cast<unsigned char>(*p)) % 255;
+        b = (b + a) % 255;
+    }
+    b ^= ~a & 0x0F;
+    return static_cast<std::uint16_t>(b << 8 | a);
+}
+
+/* Parses one line of the log, for example
+ *     06 -4.1 856.3 9.0 f e
+ * which is hour, temperature, pressure, wind, sky, flags.
+ * Empty lines and lines that start with '#' are skipped. */
+std::optional<Reading> parse(const std::string &line) {
+    if (line.empty() || line[0] == '#') {
+        return std::nullopt;
+    }
+    std::istringstream in(line);
+    Reading r;
+    char sky = 'c';
+    if (!(in >> r.hour >> r.temp >> r.pressure >> r.wind)) {
+        throw std::runtime_error("bad \"" + line + "\"");
+    }
+    in >> sky;
+    r.hour = clamp(r.hour, 0, kHoursPerDay - 1);
+    r.sky = sky == 'f' ? Sky::Fog
+          : sky == 's' ? Sky::Snow
+          : sky == 'o' ? Sky::Cloud : Sky::Clear;
+    for (char c; in >> c;) {
+        if (c == 'l') r.flags |= kLate;
+        else if (c == 'e') r.flags |= kEstimated;
+        else if (c == '!') r.flags |= kFault;
+    }
+    return r;
+}
+
+class Log {
+public:
+    explicit Log(std::size_t capacity) {
+        std::size_t most = kMaxRows;
+        rows_.reserve(std::min(capacity, most));
+    }
+
+    Log &operator+=(const Reading &r) {
+        rows_.push_back(r);
+        ++count_[r.sky];
+        return *this;
+    }
+
+    [[nodiscard]] std::size_t size() const {
+        return rows_.size();
+    }
+    const Reading &operator[](std::size_t i) const {
+        return rows_[i];
+    }
+
+    const Reading *coldest() const {
+        const Reading *best = nullptr;
+        for (const auto &r : rows_) {
+            if (!r.ok()) continue;
+            if (best == nullptr || r.temp < best->temp) {
+                best = &r;
+            }
+        }
+        return best;
+    }
+
+    // Fall of the pressure from the first row to the last.
+    double fall() const {
+        if (rows_.size() < 2) return 0.0;
+        const Reading &a = rows_.front(), &z = rows_.back();
+        return a.pressure - z.pressure;
+    }
+
+    void print() const {
+        auto temp = [](const Reading &r) { return r.temp; };
+        auto wind = [](const Reading &r) { return r.wind; };
+        double t = mean(rows_.begin(), rows_.end(), temp);
+        double w = mean(rows_.begin(), rows_.end(), wind);
+        std::printf("station %#06x\n", STATION_ID);
+        std::printf("%-10s %7zu\n", "rows", size());
+        std::printf("%-10s %7.2f C\n", "mean temp", t);
+        std::printf("%-10s %7.2f m/s\n", "mean wind", w);
+        std::printf("%-10s %7.1f hPa\n", "fall", fall());
+        for (const auto &[sky, n] : count_) {
+            int share = 100 * n / static_cast<int>(size());
+            const char *sign = share >= 50 ? "*" : "";
+            std::printf("  %-6s %2d", name(sky), n);
+            std::printf(" (%d%%)%s\n", share, sign);
+        }
+        if (const Reading *r = coldest(); r != nullptr) {
+            std::printf("coldest: %.1f C = %.2f K", r->temp,
+                        r->kelvin());
+            std::printf(" at %02d:00\n", r->hour);
+        }
+    }
+
+private:
+    std::vector<Reading> rows_;
+    std::map<Sky, int> count_;
+};
+
+// Names that are easy to mistake for one another.
+int lookalikes() {
+    int l1 = 1, I1 = 11, O0 = 0, o0 = 100, Z2 = 2, S5 = 5;
+    int B8 = 8, b6 = 6, g9 = 9, q9 = 90, rn = 3, m = 4;
+    int vv = 2, w = 3, uu = 4, U = 5, V = 6, j = 7, J = 8;
+    int X = 10, Y = 4, x = X * Y, y = X / Y;
+    int a[8] = {l1, I1, O0, o0, Z2, S5, B8, b6};
+    int xy[] = {vv, w, uu, U, V, j, J, x, y};
+    int *p = &a[0], *end = a + 8, sum = g9 - q9 + rn * m;
+    do {
+        sum += *p++ ^ (sum >> 1);
+    } while (p != end && sum <= 0x7FFF);
+    for (int n : xy) sum -= n;
+    bool keep = sum % SQUARE(Z2 + S5) >= 10 || !(sum & 1);
+    return keep ? sum : -sum;
+}
+
+const char kSigns[] = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+const char *const kUsage = R"(usage: greyfell [FILE]
+  FILE  a log to read; without one, a sample is read)";
+
+}  // namespace greyfell
+
+int main(int argc, char **argv) {
+    using namespace greyfell;
+    std::vector<std::string> lines = {
+        "# hour temp pressure wind sky flags",
+        "06 -4.1 856.3  9.0  f",
+        "09 -3.5 855.9 11.5  f l",
+        "12 -1.7 854.0 14.25 o",
+        "15 -2.2 851.6 19.0  s e",
+        "18 -5.8 847.2 27.5  s",
+        "21 -7.4 845.0 41.0  s !",
+    };
+    if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
+        std::cerr << kUsage << '\n';
+        return 2;
+    }
+    if (argc == 2) {
+        std::ifstream file(argv[1]);
+        if (!file) {
+            std::cerr << "can't read " << argv[1] << "\n";
+            return 1;
+        }
+        lines.clear();
+        for (std::string line; std::getline(file, line);) {
+            lines.push_back(line);
+        }
+    }
+
+    Log log(lines.size());
+    int skipped = 0;
+    for (const auto &line : lines) {
+        try {
+            if (auto r = parse(line)) {
+                log += *r;
+                [[maybe_unused]] auto sum =
+                    checksum(line.c_str());
+                LOG("sum " << sum << " & " << kMask);
+            } else {
+                ++skipped;
+            }
+        } catch (const std::exception &e) {
+            std::cerr << e.what() << '\n';
+            return 1;
+        }
+    }
+    std::array<int, kHoursPerDay / kStep> seen{};
+    for (std::size_t i = 0; i < log.size(); ++i) {
+        auto slot = log[i].hour / kStep;
+        seen[static_cast<std::size_t>(slot)] += 1;
+    }
+    log.print();
+    std::cout << skipped << " skipped, " << seen.size()
+              << " slots, " << sizeof kSigns - 1 << " signs, "
+              << "check " << lookalikes() << std::endl;
+    return log.size() > 0 ? 0 : 1;
+}
